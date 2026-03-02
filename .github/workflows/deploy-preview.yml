@@ -107,7 +107,6 @@ jobs:
               --restart unless-stopped \
               --env-file /tmp/preview-${PR_NUMBER}.env \
               -v /opt/sendrec/models:/models:ro \
-              -v /var/lib/docker/volumes/sendrec_garage-keys/_data:/run/garage-keys:ro \
               -l "traefik.enable=true" \
               -l "traefik.http.routers.preview-${PR_NUMBER}.rule=Host(\\\`${DOMAIN}\\\`)" \
               -l "traefik.http.routers.preview-${PR_NUMBER}.entryPoints=https" \
