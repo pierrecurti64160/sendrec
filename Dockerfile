@@ -17,8 +17,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o sendrec ./cmd/sendrec
 
 # Stage 3: Final image (base includes whisper-cli, ffmpeg, RNNoise model)
-ARG BASE_IMAGE=alexneamtu/sendrec-base:latest
-FROM ${BASE_IMAGE}
+FROM alexneamtu/sendrec-base:latest
 COPY --from=backend /app/sendrec .
 COPY docker-entrypoint.sh .
 USER sendrec
