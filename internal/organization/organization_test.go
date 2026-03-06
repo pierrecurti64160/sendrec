@@ -72,6 +72,11 @@ func TestCreate(t *testing.T) {
 		WithArgs("org-1", testUserID).
 		WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
+	// Pro user: org inherits plan
+	mock.ExpectExec(`UPDATE organizations SET subscription_plan`).
+		WithArgs("pro", testUserID, "org-1").
+		WillReturnResult(pgxmock.NewResult("UPDATE", 1))
+
 	body, _ := json.Marshal(createOrgRequest{Name: "Acme Corp"})
 
 	r := chi.NewRouter()
@@ -97,8 +102,8 @@ func TestCreate(t *testing.T) {
 	if resp.Slug != "acme-corp" {
 		t.Errorf("expected slug %q, got %q", "acme-corp", resp.Slug)
 	}
-	if resp.SubscriptionPlan != "free" {
-		t.Errorf("expected subscriptionPlan %q, got %q", "free", resp.SubscriptionPlan)
+	if resp.SubscriptionPlan != "pro" {
+		t.Errorf("expected subscriptionPlan %q, got %q", "pro", resp.SubscriptionPlan)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -536,6 +541,49 @@ func TestUpdate_RetentionDays_Invalid(t *testing.T) {
 	errMsg := parseErrorResponse(t, rec.Body.Bytes())
 	if errMsg != "invalid retention days: must be 0, 30, 60, 90, 180, or 365" {
 		t.Errorf("expected error %q, got %q", "invalid retention days: must be 0, 30, 60, 90, 180, or 365", errMsg)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet pgxmock expectations: %v", err)
+	}
+}
+
+func TestListOrganizations_ViewerExcludedFromCount(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	handler := NewHandler(mock, testBaseURL)
+
+	// The List query counts organization_members excluding viewers.
+	// An org with 3 owners/admins/members + 2 viewers → member_count = 3.
+	mock.ExpectQuery(`SELECT o\.id, o\.name, o\.slug, o\.subscription_plan, o\.retention_days, om\.role`).
+		WithArgs(testUserID).
+		WillReturnRows(pgxmock.NewRows([]string{"id", "name", "slug", "subscription_plan", "retention_days", "role", "member_count"}).
+			AddRow("org-1", "Acme Corp", "acme-corp", "free", 0, "owner", int64(3)))
+
+	r := chi.NewRouter()
+	r.With(newAuthMiddleware()).Get("/api/organizations", handler.List)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, authenticatedRequest(t, http.MethodGet, "/api/organizations", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var items []orgListItem
+	if err := json.Unmarshal(rec.Body.Bytes(), &items); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 organization, got %d", len(items))
+	}
+	// The List handler excludes viewers from member count (same as Limits handler).
+	if items[0].MemberCount != 3 {
+		t.Errorf("expected memberCount 3 (excluding viewers), got %d", items[0].MemberCount)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

@@ -131,8 +131,8 @@ export function Layout({ children }: LayoutProps) {
           <img src="/images/logo.png" alt="" width="48" height="48" />
           <span className="logo-send">Send</span><span className="logo-rec">Rec</span>
           {plan && (
-            <span className={`plan-badge${plan === "pro" ? " plan-badge--pro" : ""}`}>
-              {plan === "pro" ? "Pro" : "Free"}
+            <span className={`plan-badge${plan !== "free" ? " plan-badge--pro" : ""}`}>
+              {plan === "business" ? "Business" : plan === "pro" ? "Pro" : "Free"}
             </span>
           )}
         </Link>
@@ -236,13 +236,15 @@ export function Layout({ children }: LayoutProps) {
         </div>
 
         <div className={`nav-links${menuOpen ? " nav-links--open" : ""}`}>
-          <Link
-            to="/"
-            className={`nav-link${isActive("/") ? " nav-link--active" : ""}`}
-            onClick={handleNavClick}
-          >
-            Record
-          </Link>
+          {selectedOrg?.role !== "viewer" && (
+            <Link
+              to="/"
+              className={`nav-link${isActive("/") ? " nav-link--active" : ""}`}
+              onClick={handleNavClick}
+            >
+              Record
+            </Link>
+          )}
 
           <Link
             to="/library"

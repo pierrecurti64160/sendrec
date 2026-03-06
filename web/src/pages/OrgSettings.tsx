@@ -25,18 +25,26 @@ interface Invite {
   id: string;
   email: string;
   role: string;
+  acceptLink?: string;
   expiresAt: string;
   createdAt: string;
 }
 
 interface OrgBilling {
   plan: string;
-  effectivePlan: string;
+  planInherited: boolean;
   subscriptionStatus?: string;
   portalUrl?: string;
 }
 
-const ROLES = ["member", "admin", "owner"] as const;
+interface SsoConfig {
+  issuerUrl: string;
+  clientId: string;
+  configured: boolean;
+  enforceSso: boolean;
+}
+
+const ROLES = ["viewer", "member", "admin", "owner"] as const;
 
 export function OrgSettings() {
   const { id: orgId } = useParams<{ id: string }>();
@@ -74,6 +82,16 @@ export function OrgSettings() {
 
   const [retentionDays, setRetentionDays] = useState(0);
 
+  const [ssoIssuerUrl, setSsoIssuerUrl] = useState("");
+  const [ssoClientId, setSsoClientId] = useState("");
+  const [ssoClientSecret, setSsoClientSecret] = useState("");
+  const [ssoEnforce, setSsoEnforce] = useState(false);
+  const [ssoConfigured, setSsoConfigured] = useState(false);
+  const [ssoMessage, setSsoMessage] = useState("");
+  const [ssoError, setSsoError] = useState("");
+  const [savingSso, setSavingSso] = useState(false);
+  const [removingSso, setRemovingSso] = useState(false);
+
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState(false);
 
@@ -100,7 +118,7 @@ export function OrgSettings() {
       apiFetch<Invite[]>(`/api/organizations/${orgId}/invites`).catch(() => []),
       apiFetch<OrgBilling>(`/api/organizations/${orgId}/billing`).catch(() => null),
     ])
-      .then(([orgData, memberData, inviteData, billingData]) => {
+      .then(async ([orgData, memberData, inviteData, billingData]) => {
         if (orgData) {
           setOrg(orgData);
           setOrgName(orgData.name);
@@ -112,6 +130,19 @@ export function OrgSettings() {
         setMembers(memberData ?? []);
         setInvites((inviteData as Invite[]) ?? []);
         setBilling(billingData as OrgBilling | null);
+
+        const billingPlan = (billingData as OrgBilling | null)?.plan ?? orgData?.subscriptionPlan;
+        if (billingPlan === "business") {
+          try {
+            const ssoData = await apiFetch<SsoConfig>(`/api/organizations/${orgId}/sso`);
+            if (ssoData) {
+              setSsoIssuerUrl(ssoData.issuerUrl || "");
+              setSsoClientId(ssoData.clientId || "");
+              setSsoConfigured(ssoData.configured);
+              setSsoEnforce(ssoData.enforceSso);
+            }
+          } catch { /* SSO not available */ }
+        }
       })
       .catch(() => setError("Failed to load workspace"))
       .finally(() => setLoading(false));
@@ -215,24 +246,42 @@ export function OrgSettings() {
     }
   }
 
-  async function handleUpgrade() {
+  async function doUpgrade(plan: string) {
     setUpgrading(true);
     setBillingMessage("");
     try {
-      const resp = await apiFetch<{ checkoutUrl: string }>(
+      const resp = await apiFetch<{ checkoutUrl?: string; upgraded?: string }>(
         `/api/organizations/${orgId}/billing/checkout`,
         {
           method: "POST",
-          body: JSON.stringify({ plan: "pro" }),
+          body: JSON.stringify({ plan }),
         }
       );
-      if (resp?.checkoutUrl) {
+      if (resp?.upgraded) {
+        window.location.reload();
+      } else if (resp?.checkoutUrl) {
         window.location.href = resp.checkoutUrl;
       }
     } catch (err) {
       setBillingMessage(err instanceof Error ? err.message : "Failed to start checkout");
     } finally {
       setUpgrading(false);
+    }
+  }
+
+  function handleUpgrade(plan: string) {
+    if (billing?.subscriptionStatus && billing.subscriptionStatus !== "canceled") {
+      const label = plan === "business" ? "Business" : "Pro";
+      setConfirmDialog({
+        message: `Upgrade to ${label}? Your remaining credit will be prorated.`,
+        confirmLabel: `Upgrade to ${label}`,
+        onConfirm: () => {
+          setConfirmDialog(null);
+          doUpgrade(plan);
+        },
+      });
+    } else {
+      doUpgrade(plan);
     }
   }
 
@@ -290,6 +339,58 @@ export function OrgSettings() {
     } catch {
       setRetentionDays(previous);
     }
+  }
+
+  async function handleSsoSave(event: FormEvent) {
+    event.preventDefault();
+    setSsoError("");
+    setSsoMessage("");
+    setSavingSso(true);
+    try {
+      await apiFetch(`/api/organizations/${orgId}/sso`, {
+        method: "PUT",
+        body: JSON.stringify({
+          issuerUrl: ssoIssuerUrl.trim(),
+          clientId: ssoClientId.trim(),
+          clientSecret: ssoClientSecret || undefined,
+          enforceSso: ssoEnforce,
+        }),
+      });
+      setSsoMessage("SSO settings saved");
+      setSsoConfigured(true);
+      setSsoClientSecret("");
+    } catch (err) {
+      setSsoError(err instanceof Error ? err.message : "Failed to save SSO settings");
+    } finally {
+      setSavingSso(false);
+    }
+  }
+
+  function handleRemoveSso() {
+    setConfirmDialog({
+      message: "Remove SSO configuration? Members will need to use password login.",
+      confirmLabel: "Remove SSO",
+      danger: true,
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setRemovingSso(true);
+        setSsoError("");
+        setSsoMessage("");
+        try {
+          await apiFetch(`/api/organizations/${orgId}/sso`, { method: "DELETE" });
+          setSsoIssuerUrl("");
+          setSsoClientId("");
+          setSsoClientSecret("");
+          setSsoEnforce(false);
+          setSsoConfigured(false);
+          setSsoMessage("SSO configuration removed");
+        } catch (err) {
+          setSsoError(err instanceof Error ? err.message : "Failed to remove SSO");
+        } finally {
+          setRemovingSso(false);
+        }
+      },
+    });
   }
 
   if (orgsLoading || !canManage || loading) {
@@ -447,6 +548,7 @@ export function OrgSettings() {
                 value={inviteRole}
                 onChange={(e) => setInviteRole(e.target.value)}
               >
+                <option value="viewer">Viewer</option>
                 <option value="member">Member</option>
                 <option value="admin">Admin</option>
               </select>
@@ -479,6 +581,17 @@ export function OrgSettings() {
                         Role: {invite.role} — Expires {new Date(invite.expiresAt).toLocaleDateString("en-GB")}
                       </span>
                     </div>
+                    {invite.acceptLink && (
+                      <button
+                        type="button"
+                        className="btn btn--secondary btn--danger-sm"
+                        onClick={() => {
+                          navigator.clipboard.writeText(invite.acceptLink!);
+                        }}
+                      >
+                        Copy link
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn--danger btn--danger-sm"
@@ -498,21 +611,21 @@ export function OrgSettings() {
         <div className="card settings-section">
           <div className="card-header">
             <h2>Billing</h2>
-            <span className={`plan-badge ${billing.effectivePlan === "pro" || billing.effectivePlan === "business" ? "plan-badge--pro" : ""}`}>
-              {billing.effectivePlan === "pro" || billing.effectivePlan === "business" ? "Pro" : "Free"}
+            <span className={`plan-badge ${billing.plan !== "free" ? "plan-badge--pro" : ""}`}>
+              {billing.plan === "business" ? "Business" : billing.plan === "pro" ? "Pro" : "Free"}
             </span>
           </div>
 
-          {billing.plan === "free" && billing.effectivePlan !== billing.plan && (
+          {billing.planInherited && (
             <p className="card-description">
-              This workspace has Pro features through your personal subscription. No separate workspace upgrade needed.
+              Inherited from your personal plan. Upgrade the workspace directly for independent billing.
             </p>
           )}
 
-          {billing.plan === "free" && billing.effectivePlan === billing.plan && !billing.subscriptionStatus && (
+          {billing.plan === "free" && !billing.planInherited && !billing.subscriptionStatus && (
             <>
               <p className="card-description">
-                Upgrade to Pro for unlimited videos and recording duration.
+                Upgrade for unlimited videos and recording duration.
               </p>
               <div className="upgrade-card">
                 <div className="upgrade-card-info">
@@ -524,14 +637,51 @@ export function OrgSettings() {
                   <button
                     type="button"
                     className="btn btn--primary"
-                    onClick={handleUpgrade}
+                    onClick={() => handleUpgrade("pro")}
                     disabled={upgrading}
                   >
                     {upgrading ? "Redirecting..." : "Upgrade to Pro"}
                   </button>
                 </div>
               </div>
+              <div className="upgrade-card">
+                <div className="upgrade-card-info">
+                  <span className="upgrade-card-plan">Business</span>
+                  <span className="upgrade-card-desc">Everything in Pro, plus SSO and workspace access controls</span>
+                </div>
+                <div className="upgrade-card-actions">
+                  <span className="upgrade-card-price">&euro;12/mo</span>
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    onClick={() => handleUpgrade("business")}
+                    disabled={upgrading}
+                  >
+                    {upgrading ? "Redirecting..." : "Upgrade to Business"}
+                  </button>
+                </div>
+              </div>
             </>
+          )}
+
+          {billing.plan === "pro" && billing.subscriptionStatus !== "canceled" && (
+            <div className="upgrade-card">
+              <div className="upgrade-card-info">
+                <span className="upgrade-card-plan">Business</span>
+                <span className="upgrade-card-desc">Everything in Pro, plus SSO and workspace access controls</span>
+              </div>
+              <div className="upgrade-card-actions">
+                <span className="upgrade-card-price">&euro;12/mo</span>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={() => handleUpgrade("business")}
+                  disabled={upgrading}
+                >
+                  {upgrading ? "Redirecting..." : "Upgrade to Business"}
+                </button>
+              </div>
+            </div>
           )}
 
           {billing.subscriptionStatus === "canceled" && (
@@ -540,7 +690,7 @@ export function OrgSettings() {
             </p>
           )}
 
-          {billing.plan === "pro" && billing.subscriptionStatus !== "canceled" && (
+          {(billing.plan === "pro" || billing.plan === "business") && billing.subscriptionStatus !== "canceled" && (
             <div className="btn-row">
               {billing.portalUrl && (
                 <a
@@ -592,6 +742,97 @@ export function OrgSettings() {
             </select>
           </div>
         </div>
+      )}
+
+      {canManage && (billing?.plan === "business" || org.subscriptionPlan === "business") && (
+        <form onSubmit={handleSsoSave} className="card settings-section">
+          <h2>Single Sign-On</h2>
+          <p className="card-description">
+            Configure OIDC-based single sign-on for your workspace. Members can sign in using your identity provider.
+          </p>
+
+          <div className="form-field">
+            <label className="form-label" htmlFor="sso-issuer-url">Issuer URL</label>
+            <input
+              id="sso-issuer-url"
+              type="url"
+              className="form-input"
+              value={ssoIssuerUrl}
+              onChange={(e) => setSsoIssuerUrl(e.target.value)}
+              placeholder="https://accounts.google.com"
+              required
+            />
+          </div>
+
+          <div className="form-field">
+            <label className="form-label" htmlFor="sso-client-id">Client ID</label>
+            <input
+              id="sso-client-id"
+              type="text"
+              className="form-input"
+              value={ssoClientId}
+              onChange={(e) => setSsoClientId(e.target.value)}
+              required
+            />
+          </div>
+
+          <div className="form-field">
+            <label className="form-label" htmlFor="sso-client-secret">Client Secret</label>
+            <input
+              id="sso-client-secret"
+              type="password"
+              className="form-input"
+              value={ssoClientSecret}
+              onChange={(e) => setSsoClientSecret(e.target.value)}
+              placeholder={ssoConfigured ? "Unchanged" : ""}
+            />
+          </div>
+
+          <div className="form-field" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <input
+              id="sso-enforce"
+              type="checkbox"
+              checked={ssoEnforce}
+              onChange={(e) => setSsoEnforce(e.target.checked)}
+              style={{ width: "auto" }}
+            />
+            <label htmlFor="sso-enforce" className="form-label" style={{ margin: 0 }}>
+              Enforce SSO for all members
+            </label>
+          </div>
+          {ssoEnforce && (
+            <p className="form-hint" style={{ color: "var(--color-warning)" }}>
+              When enforced, members must sign in through your identity provider. Password login will be disabled for workspace members.
+            </p>
+          )}
+
+          {ssoError && (
+            <p className="status-message status-message--error">{ssoError}</p>
+          )}
+          {ssoMessage && (
+            <p className="status-message status-message--success">{ssoMessage}</p>
+          )}
+
+          <div className="btn-row">
+            <button
+              type="submit"
+              className="btn btn--primary"
+              disabled={savingSso || !ssoIssuerUrl.trim() || !ssoClientId.trim()}
+            >
+              {savingSso ? "Saving..." : "Save SSO settings"}
+            </button>
+            {ssoConfigured && (
+              <button
+                type="button"
+                className="btn btn--danger"
+                onClick={handleRemoveSso}
+                disabled={removingSso}
+              >
+                {removingSso ? "Removing..." : "Remove SSO"}
+              </button>
+            )}
+          </div>
+        </form>
       )}
 
       {isOwner && (

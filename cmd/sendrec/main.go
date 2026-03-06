@@ -110,6 +110,8 @@ func main() {
 	creemWebhookSecret := os.Getenv("CREEM_WEBHOOK_SECRET")
 	creemProProductID := os.Getenv("CREEM_PRO_PRODUCT_ID")
 	creemOrgProProductID := os.Getenv("CREEM_ORG_PRO_PRODUCT_ID")
+	creemBusinessProductID := os.Getenv("CREEM_BUSINESS_PRODUCT_ID")
+	creemOrgBusinessProductID := os.Getenv("CREEM_ORG_BUSINESS_PRODUCT_ID")
 
 	slog.Info("sendrec starting", "version", version)
 
@@ -141,10 +143,18 @@ func main() {
 		ViewNotifier:            emailClient,
 		SlackNotifier:           slackClient,
 		WebhookClient:           webhookClient,
-		CreemAPIKey:             creemAPIKey,
-		CreemWebhookSecret:      creemWebhookSecret,
-		CreemProProductID:       creemProProductID,
-		CreemOrgProProductID:    creemOrgProProductID,
+		CreemAPIKey:               creemAPIKey,
+		CreemWebhookSecret:        creemWebhookSecret,
+		CreemProProductID:         creemProProductID,
+		CreemOrgProProductID:      creemOrgProProductID,
+		CreemBusinessProductID:    creemBusinessProductID,
+		CreemOrgBusinessProductID: creemOrgBusinessProductID,
+		GoogleClientID:          getEnv("GOOGLE_CLIENT_ID", ""),
+		GoogleClientSecret:      getEnv("GOOGLE_CLIENT_SECRET", ""),
+		MicrosoftClientID:       getEnv("MICROSOFT_CLIENT_ID", ""),
+		MicrosoftClientSecret:   getEnv("MICROSOFT_CLIENT_SECRET", ""),
+		GitHubSSOClientID:       getEnv("GITHUB_SSO_CLIENT_ID", ""),
+		GitHubSSOClientSecret:   getEnv("GITHUB_SSO_CLIENT_SECRET", ""),
 	})
 
 	if creemAPIKey != "" {

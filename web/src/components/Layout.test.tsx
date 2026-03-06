@@ -191,6 +191,16 @@ describe("Layout", () => {
     expect(screen.getByText("Pro")).toHaveClass("plan-badge", "plan-badge--pro");
   });
 
+  it("shows Business badge for business plan", async () => {
+    mockApiFetch.mockResolvedValueOnce({ plan: "business" });
+    renderLayout();
+
+    await waitFor(() => {
+      expect(screen.getByText("Business")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Business")).toHaveClass("plan-badge", "plan-badge--pro");
+  });
+
   it("shows Free badge when billing API fails", async () => {
     mockApiFetch.mockRejectedValueOnce(new Error("not available"));
     renderLayout();
@@ -404,5 +414,41 @@ describe("Layout", () => {
   it("has no accessibility violations", async () => {
     const { container } = renderLayout();
     await expectNoA11yViolations(container);
+  });
+
+  it("hides Record link when viewer role", () => {
+    mockUseOrganization.mockReturnValue({
+      orgs: [
+        { id: "org-1", name: "Acme Corp", slug: "acme", subscriptionPlan: "free", role: "viewer", memberCount: 3 },
+      ],
+      selectedOrg: { id: "org-1", name: "Acme Corp", slug: "acme", subscriptionPlan: "free", role: "viewer", memberCount: 3 },
+      selectedOrgId: "org-1",
+      switchOrg: mockSwitchOrg,
+      createOrg: mockCreateOrg,
+      refreshOrgs: mockRefreshOrgs,
+      loading: false,
+    });
+    renderLayout();
+    expect(screen.queryByRole("link", { name: "Record" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Library" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Playlists" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Analytics" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("shows Record link for member role", () => {
+    mockUseOrganization.mockReturnValue({
+      orgs: [
+        { id: "org-1", name: "Acme Corp", slug: "acme", subscriptionPlan: "free", role: "member", memberCount: 3 },
+      ],
+      selectedOrg: { id: "org-1", name: "Acme Corp", slug: "acme", subscriptionPlan: "free", role: "member", memberCount: 3 },
+      selectedOrgId: "org-1",
+      switchOrg: mockSwitchOrg,
+      createOrg: mockCreateOrg,
+      refreshOrgs: mockRefreshOrgs,
+      loading: false,
+    });
+    renderLayout();
+    expect(screen.getByRole("link", { name: "Record" })).toBeInTheDocument();
   });
 });

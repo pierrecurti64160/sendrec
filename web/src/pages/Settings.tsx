@@ -6,6 +6,7 @@ import { useUnsavedChanges } from "../hooks/useUnsavedChanges";
 import { TRANSCRIPTION_LANGUAGES } from "../constants/languages";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { LimitsResponse } from "../types/limits";
+import { providerLabel } from "../utils/sso";
 
 interface UserProfile {
   name: string;
@@ -47,6 +48,16 @@ interface IntegrationConfig {
   id?: string;
   provider: string;
   config: Record<string, string>;
+}
+
+interface LinkedIdentity {
+  provider: string;
+  email: string;
+}
+
+interface IdentitiesResponse {
+  identities: LinkedIdentity[];
+  hasPassword: boolean;
 }
 
 const hexColorPattern = /^#[0-9a-fA-F]{6}$/;
@@ -138,6 +149,9 @@ export function Settings() {
   const [jiraEmail, setJiraEmail] = useState("");
   const [jiraApiToken, setJiraApiToken] = useState("");
   const [jiraProjectKey, setJiraProjectKey] = useState("");
+  const [identities, setIdentities] = useState<LinkedIdentity[]>([]);
+  const [identityHasPassword, setIdentityHasPassword] = useState(false);
+  const [identityError, setIdentityError] = useState("");
 
   const nameIsDirty = profile !== null && name !== profile.name;
   useUnsavedChanges(nameIsDirty);
@@ -209,7 +223,10 @@ export function Settings() {
       }
 
       try {
-        const intgData = await apiFetch<IntegrationConfig[]>("/api/settings/integrations");
+        const [intgData, identityData] = await Promise.all([
+          apiFetch<IntegrationConfig[]>("/api/settings/integrations").catch(() => null),
+          apiFetch<IdentitiesResponse>("/api/user/identities").catch(() => null),
+        ]);
         if (intgData) {
           setIntegrations(intgData);
           for (const ig of intgData) {
@@ -225,7 +242,11 @@ export function Settings() {
             }
           }
         }
-      } catch { /* integrations endpoint not available — ok */ }
+        if (identityData) {
+          setIdentities(identityData.identities);
+          setIdentityHasPassword(identityData.hasPassword);
+        }
+      } catch { /* integrations/identities not available */ }
 
       const params = new URLSearchParams(window.location.search);
       if (params.get("billing") === "success") {
@@ -519,21 +540,39 @@ export function Settings() {
     }
   }
 
-  async function handleUpgrade() {
+  async function doUpgrade(plan: string) {
     setUpgrading(true);
     setBillingMessage("");
     try {
-      const resp = await apiFetch<{ checkoutUrl: string }>("/api/settings/billing/checkout", {
+      const resp = await apiFetch<{ checkoutUrl?: string; upgraded?: string }>("/api/settings/billing/checkout", {
         method: "POST",
-        body: JSON.stringify({ plan: "pro" }),
+        body: JSON.stringify({ plan }),
       });
-      if (resp?.checkoutUrl) {
+      if (resp?.upgraded) {
+        window.location.reload();
+      } else if (resp?.checkoutUrl) {
         window.location.href = resp.checkoutUrl;
       }
     } catch (err: unknown) {
       setBillingMessage(err instanceof Error ? err.message : "Failed to start checkout");
     } finally {
       setUpgrading(false);
+    }
+  }
+
+  function handleUpgrade(plan: string) {
+    if (billing?.subscriptionId) {
+      const label = plan === "business" ? "Business" : "Pro";
+      setConfirmDialog({
+        message: `Upgrade to ${label}? Your remaining credit will be prorated.`,
+        confirmLabel: `Upgrade to ${label}`,
+        onConfirm: () => {
+          setConfirmDialog(null);
+          doUpgrade(plan);
+        },
+      });
+    } else {
+      doUpgrade(plan);
     }
   }
 
@@ -603,6 +642,16 @@ export function Settings() {
     }
   }
 
+  async function handleDisconnectIdentity(provider: string) {
+    setIdentityError("");
+    try {
+      await apiFetch(`/api/user/identities/${provider}`, { method: "DELETE" });
+      setIdentities((prev) => prev.filter((i) => i.provider !== provider));
+    } catch (err) {
+      setIdentityError(err instanceof Error ? err.message : "Failed to disconnect");
+    }
+  }
+
   if (!profile) {
     return (
       <div className="page-container page-container--centered">
@@ -658,15 +707,15 @@ export function Settings() {
         <div className="card settings-section">
           <div className="card-header">
             <h2>Subscription</h2>
-            <span className={`plan-badge ${billing.plan === "pro" ? "plan-badge--pro" : ""}`}>
-              {billing.plan === "pro" ? "Pro" : "Free"}
+            <span className={`plan-badge ${billing.plan !== "free" ? "plan-badge--pro" : ""}`}>
+              {billing.plan === "business" ? "Business" : billing.plan === "pro" ? "Pro" : "Free"}
             </span>
           </div>
 
           {billing.plan === "free" && !billing.subscriptionStatus && (
             <>
               <p className="card-description">
-                Upgrade to Pro for unlimited videos and recording duration.
+                Upgrade for unlimited videos and recording duration.
               </p>
               <div className="upgrade-card">
                 <div className="upgrade-card-info">
@@ -678,14 +727,51 @@ export function Settings() {
                   <button
                     type="button"
                     className="btn btn--primary"
-                    onClick={handleUpgrade}
+                    onClick={() => handleUpgrade("pro")}
                     disabled={upgrading}
                   >
                     {upgrading ? "Redirecting..." : "Upgrade to Pro"}
                   </button>
                 </div>
               </div>
+              <div className="upgrade-card">
+                <div className="upgrade-card-info">
+                  <span className="upgrade-card-plan">Business</span>
+                  <span className="upgrade-card-desc">Everything in Pro, plus SSO and workspace access controls</span>
+                </div>
+                <div className="upgrade-card-actions">
+                  <span className="upgrade-card-price">&euro;12/mo</span>
+                  <button
+                    type="button"
+                    className="btn btn--primary"
+                    onClick={() => handleUpgrade("business")}
+                    disabled={upgrading}
+                  >
+                    {upgrading ? "Redirecting..." : "Upgrade to Business"}
+                  </button>
+                </div>
+              </div>
             </>
+          )}
+
+          {billing.plan === "pro" && billing.subscriptionStatus !== "canceled" && (
+            <div className="upgrade-card">
+              <div className="upgrade-card-info">
+                <span className="upgrade-card-plan">Business</span>
+                <span className="upgrade-card-desc">Everything in Pro, plus SSO and workspace access controls</span>
+              </div>
+              <div className="upgrade-card-actions">
+                <span className="upgrade-card-price">&euro;12/mo</span>
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  onClick={() => handleUpgrade("business")}
+                  disabled={upgrading}
+                >
+                  {upgrading ? "Redirecting..." : "Upgrade to Business"}
+                </button>
+              </div>
+            </div>
           )}
 
           {billing.subscriptionStatus === "canceled" && (
@@ -694,7 +780,7 @@ export function Settings() {
             </p>
           )}
 
-          {billing.plan === "pro" && billing.subscriptionStatus !== "canceled" && (
+          {(billing.plan === "pro" || billing.plan === "business") && billing.subscriptionStatus !== "canceled" && (
             <div className="btn-row">
               {billing.portalUrl && (
                 <a
@@ -1626,6 +1712,39 @@ body                /* Background, font, text color */
           </button>
         </div>
       </form>
+
+      {identities.length > 0 && (
+        <div className="card settings-section">
+          <h2>Connected Accounts</h2>
+          <p className="card-description">
+            External accounts linked to your SendRec account.
+          </p>
+
+          {identityError && (
+            <p className="status-message status-message--error">{identityError}</p>
+          )}
+
+          <div className="key-list">
+            {identities.map((identity) => (
+              <div key={identity.provider} className="api-key-row">
+                <div className="api-key-info">
+                  <span className="api-key-name">{providerLabel(identity.provider)}</span>
+                  <span className="api-key-meta">{identity.email}</span>
+                </div>
+                <button
+                  type="button"
+                  className="btn btn--danger btn--danger-sm"
+                  onClick={() => handleDisconnectIdentity(identity.provider)}
+                  disabled={identities.length <= 1 && !identityHasPassword}
+                  title={identities.length <= 1 && !identityHasPassword ? "Cannot disconnect your only login method" : undefined}
+                >
+                  Disconnect
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {confirmDialog && (
         <ConfirmDialog

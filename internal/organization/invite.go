@@ -26,11 +26,12 @@ type sendInviteRequest struct {
 }
 
 type inviteResponse struct {
-	ID        string `json:"id"`
-	Email     string `json:"email"`
-	Role      string `json:"role"`
-	ExpiresAt string `json:"expiresAt"`
-	CreatedAt string `json:"createdAt"`
+	ID         string `json:"id"`
+	Email      string `json:"email"`
+	Role       string `json:"role"`
+	AcceptLink string `json:"acceptLink,omitempty"`
+	ExpiresAt  string `json:"expiresAt"`
+	CreatedAt  string `json:"createdAt"`
 }
 
 type inviteListItem struct {
@@ -102,8 +103,8 @@ func (h *Handler) SendInvite(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusBadRequest, "email is required")
 		return
 	}
-	if req.Role != "admin" && req.Role != "member" {
-		httputil.WriteError(w, http.StatusBadRequest, "role must be admin or member")
+	if req.Role != "admin" && req.Role != "member" && req.Role != "viewer" {
+		httputil.WriteError(w, http.StatusBadRequest, "role must be admin, member, or viewer")
 		return
 	}
 
@@ -169,11 +170,12 @@ func (h *Handler) SendInvite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputil.WriteJSON(w, http.StatusCreated, inviteResponse{
-		ID:        inviteID,
-		Email:     req.Email,
-		Role:      req.Role,
-		ExpiresAt: expiresAt.Format(time.RFC3339),
-		CreatedAt: createdAt.Format(time.RFC3339),
+		ID:         inviteID,
+		Email:      req.Email,
+		Role:       req.Role,
+		AcceptLink: h.baseURL + "/invites/accept?token=" + rawToken,
+		ExpiresAt:  expiresAt.Format(time.RFC3339),
+		CreatedAt:  createdAt.Format(time.RFC3339),
 	})
 }
 

@@ -6615,14 +6615,14 @@ func authenticatedOrgRequest(t *testing.T, method, target string, body []byte) *
 	return req.WithContext(ctx)
 }
 
-func expectOrgPlanQuery(mock pgxmock.PgxPoolIface, orgPlan, ownerPlan string) {
-	mock.ExpectQuery(`SELECT o.subscription_plan`).
+func expectOrgPlanQuery(mock pgxmock.PgxPoolIface, orgPlan string) {
+	mock.ExpectQuery(`SELECT subscription_plan FROM organizations WHERE id`).
 		WithArgs(testOrgID).
-		WillReturnRows(pgxmock.NewRows([]string{"subscription_plan", "subscription_plan"}).
-			AddRow(orgPlan, ownerPlan))
+		WillReturnRows(pgxmock.NewRows([]string{"subscription_plan"}).
+			AddRow(orgPlan))
 }
 
-func TestLimits_OrgFreeWithProOwner(t *testing.T) {
+func TestLimits_OrgProInherited(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatal(err)
@@ -6632,8 +6632,8 @@ func TestLimits_OrgFreeWithProOwner(t *testing.T) {
 	storage := &mockStorage{}
 	handler := NewHandler(mock, storage, testBaseURL, 0, 25, 300, 3, testJWTSecret, false)
 
-	expectOrgPlanQuery(mock, "free", "pro")
-	// Pro effective plan → unlimited videos, playlists
+	expectOrgPlanQuery(mock, "pro")
+	// Pro plan → unlimited videos, playlists
 	// getUserPlan for org member limits
 	expectPlanQuery(mock, "free")
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM organization_members WHERE organization_id`).
@@ -6672,7 +6672,7 @@ func TestLimits_OrgFreeWithProOwner(t *testing.T) {
 	}
 }
 
-func TestLimits_OrgProWithFreeOwner(t *testing.T) {
+func TestLimits_OrgProOwnSubscription(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatal(err)
@@ -6682,8 +6682,8 @@ func TestLimits_OrgProWithFreeOwner(t *testing.T) {
 	storage := &mockStorage{}
 	handler := NewHandler(mock, storage, testBaseURL, 0, 25, 300, 3, testJWTSecret, false)
 
-	expectOrgPlanQuery(mock, "pro", "free")
-	// Pro effective plan → unlimited
+	expectOrgPlanQuery(mock, "pro")
+	// Pro plan → unlimited
 	expectPlanQuery(mock, "free")
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM organization_members WHERE organization_id`).
 		WithArgs(testOrgID).
@@ -6715,7 +6715,7 @@ func TestLimits_OrgProWithFreeOwner(t *testing.T) {
 	}
 }
 
-func TestLimits_OrgFreeWithFreeOwner(t *testing.T) {
+func TestLimits_OrgFree(t *testing.T) {
 	mock, err := pgxmock.NewPool()
 	if err != nil {
 		t.Fatal(err)
@@ -6725,7 +6725,7 @@ func TestLimits_OrgFreeWithFreeOwner(t *testing.T) {
 	storage := &mockStorage{}
 	handler := NewHandler(mock, storage, testBaseURL, 0, 25, 300, 3, testJWTSecret, false)
 
-	expectOrgPlanQuery(mock, "free", "free")
+	expectOrgPlanQuery(mock, "free")
 	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM videos WHERE organization_id`).
 		WithArgs(testOrgID).
 		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(5))
@@ -6765,6 +6765,64 @@ func TestLimits_OrgFreeWithFreeOwner(t *testing.T) {
 	}
 	if resp.RetentionDays != 60 {
 		t.Errorf("expected retentionDays 60, got %d", resp.RetentionDays)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Errorf("unmet pgxmock expectations: %v", err)
+	}
+}
+
+func TestLimits_ViewerExcludedFromMemberCount(t *testing.T) {
+	mock, err := pgxmock.NewPool()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mock.Close()
+
+	storage := &mockStorage{}
+	handler := NewHandler(mock, storage, testBaseURL, 0, 25, 300, 3, testJWTSecret, false)
+
+	// Free org plan triggers member count queries
+	expectOrgPlanQuery(mock, "free")
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM videos WHERE organization_id`).
+		WithArgs(testOrgID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM playlists`).
+		WithArgs(testUserID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(0))
+	expectPlanQuery(mock, "free")
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM organization_members WHERE user_id`).
+		WithArgs(testUserID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(1))
+
+	// This query must contain "role != 'viewer'" to exclude viewers from the count.
+	// The org has 5 total members but only 3 non-viewer members.
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM organization_members WHERE organization_id = \$1 AND role != 'viewer'`).
+		WithArgs(testOrgID).
+		WillReturnRows(pgxmock.NewRows([]string{"count"}).AddRow(3))
+	mock.ExpectQuery(`SELECT retention_days FROM organizations WHERE id = \$1`).
+		WithArgs(testOrgID).
+		WillReturnRows(pgxmock.NewRows([]string{"retention_days"}).AddRow(0))
+
+	r := chi.NewRouter()
+	r.With(newAuthMiddleware()).Get("/api/videos/limits", handler.Limits)
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, authenticatedOrgRequest(t, http.MethodGet, "/api/videos/limits", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	var resp limitsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if resp.OrgMembersUsed != 3 {
+		t.Errorf("expected orgMembersUsed 3 (viewers excluded), got %d", resp.OrgMembersUsed)
+	}
+	if resp.MaxOrgMembers != 3 {
+		t.Errorf("expected maxOrgMembers 3 (free plan limit), got %d", resp.MaxOrgMembers)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {

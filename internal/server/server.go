@@ -18,6 +18,7 @@ import (
 	"github.com/sendrec/sendrec/internal/integration"
 	"github.com/sendrec/sendrec/internal/organization"
 	"github.com/sendrec/sendrec/internal/ratelimit"
+	"github.com/sendrec/sendrec/internal/sso"
 	"github.com/sendrec/sendrec/internal/video"
 	"github.com/sendrec/sendrec/internal/webhook"
 )
@@ -51,12 +52,20 @@ type Config struct {
 	ViewNotifier            video.ViewNotifier
 	SlackNotifier           video.SlackNotifier
 	WebhookClient           *webhook.Client
-	CreemAPIKey             string
-	CreemWebhookSecret      string
-	CreemProProductID       string
-	CreemOrgProProductID    string
+	CreemAPIKey              string
+	CreemWebhookSecret       string
+	CreemProProductID        string
+	CreemOrgProProductID     string
+	CreemBusinessProductID   string
+	CreemOrgBusinessProductID string
 	RegistrationEnabled     bool
 	GeoIPDBPath             string
+	GoogleClientID          string
+	GoogleClientSecret      string
+	MicrosoftClientID       string
+	MicrosoftClientSecret   string
+	GitHubSSOClientID       string
+	GitHubSSOClientSecret   string
 }
 
 type Server struct {
@@ -67,6 +76,7 @@ type Server struct {
 	videoHandler        *video.Handler
 	orgHandler          *organization.Handler
 	integrationHandler  *integration.Handler
+	ssoHandler          *sso.Handler
 	db                  database.DBTX
 	billingHandlers     *billing.Handlers
 	webFS               fs.FS
@@ -140,7 +150,7 @@ func New(cfg Config) *Server {
 
 		if cfg.CreemAPIKey != "" {
 			creemClient := billing.New(cfg.CreemAPIKey, "")
-			s.billingHandlers = billing.NewHandlers(cfg.DB, creemClient, baseURL, cfg.CreemProProductID, cfg.CreemOrgProProductID, cfg.CreemWebhookSecret)
+			s.billingHandlers = billing.NewHandlers(cfg.DB, creemClient, baseURL, cfg.CreemProProductID, cfg.CreemOrgProProductID, cfg.CreemBusinessProductID, cfg.CreemOrgBusinessProductID, cfg.CreemWebhookSecret)
 		}
 
 		s.orgHandler = organization.NewHandler(cfg.DB, baseURL)
@@ -149,6 +159,40 @@ func New(cfg Config) *Server {
 		}
 
 		s.integrationHandler = integration.NewHandler(cfg.DB, integration.DeriveKey(jwtSecret), baseURL)
+
+		encKey := integration.DeriveKey(jwtSecret)
+		s.ssoHandler = sso.NewHandler(cfg.DB, jwtSecret, baseURL, secureCookies, encKey)
+
+		if cfg.GoogleClientID != "" {
+			googleProvider, err := sso.NewOIDCProvider(context.Background(), sso.OIDCConfig{
+				IssuerURL:    "https://accounts.google.com",
+				ClientID:     cfg.GoogleClientID,
+				ClientSecret: cfg.GoogleClientSecret,
+				RedirectURL:  baseURL + "/api/auth/sso/google/callback",
+			})
+			if err == nil {
+				s.ssoHandler.RegisterProvider("google", googleProvider)
+			}
+		}
+		if cfg.MicrosoftClientID != "" {
+			msProvider, err := sso.NewOIDCProvider(context.Background(), sso.OIDCConfig{
+				IssuerURL:    "https://login.microsoftonline.com/common/v2.0",
+				ClientID:     cfg.MicrosoftClientID,
+				ClientSecret: cfg.MicrosoftClientSecret,
+				RedirectURL:  baseURL + "/api/auth/sso/microsoft/callback",
+			})
+			if err == nil {
+				s.ssoHandler.RegisterProvider("microsoft", msProvider)
+			}
+		}
+		if cfg.GitHubSSOClientID != "" {
+			ghProvider := sso.NewGitHubProvider(sso.GitHubConfig{
+				ClientID:     cfg.GitHubSSOClientID,
+				ClientSecret: cfg.GitHubSSOClientSecret,
+				RedirectURL:  baseURL + "/api/auth/sso/github/callback",
+			})
+			s.ssoHandler.RegisterProvider("github", ghProvider)
+		}
 	}
 
 	s.routes()
@@ -210,6 +254,17 @@ func (s *Server) routes() {
 			r.Post("/confirm-email", s.authHandler.ConfirmEmail)
 			r.Post("/resend-confirmation", s.authHandler.ResendConfirmation)
 		})
+
+		if s.ssoHandler != nil {
+			s.router.Route("/api/auth/sso", func(r chi.Router) {
+				r.Use(authLimiter.Middleware)
+				r.Get("/providers", s.ssoHandler.Providers)
+				r.Get("/org", s.ssoHandler.InitiateOrgSSO)
+				r.Get("/org/callback", s.ssoHandler.OrgCallback)
+				r.Get("/{provider}", s.ssoHandler.Initiate)
+				r.Get("/{provider}/callback", s.ssoHandler.Callback)
+			})
+		}
 	}
 
 	if s.authHandler != nil {
@@ -218,6 +273,10 @@ func (s *Server) routes() {
 			r.Use(maxBodySize(64 * 1024))
 			r.Get("/", s.authHandler.GetUser)
 			r.Patch("/", s.authHandler.UpdateUser)
+			if s.ssoHandler != nil {
+				r.Get("/identities", s.ssoHandler.ListIdentities)
+				r.Delete("/identities/{provider}", s.ssoHandler.UnlinkIdentity)
+			}
 		})
 	}
 
@@ -243,6 +302,11 @@ func (s *Server) routes() {
 						r.Post("/checkout", s.billingHandlers.CreateOrgCheckout)
 						r.Delete("/", s.billingHandlers.CancelOrgSubscription)
 					})
+				}
+				if s.ssoHandler != nil {
+					r.Get("/sso", s.ssoHandler.GetConfig)
+					r.Put("/sso", s.ssoHandler.SaveConfig)
+					r.Delete("/sso", s.ssoHandler.DeleteConfig)
 				}
 			})
 		})
@@ -294,45 +358,53 @@ func (s *Server) routes() {
 			r.Group(func(r chi.Router) {
 				r.Use(s.authHandler.Middleware)
 				r.Use(organization.Middleware(s.db))
-				r.Post("/", s.videoHandler.Create)
-				r.Post("/upload", s.videoHandler.Upload)
+
+				// Read-only routes (viewer allowed)
 				r.Get("/limits", s.videoHandler.Limits)
-				r.Post("/batch/delete", s.videoHandler.BatchDelete)
-				r.Post("/batch/folder", s.videoHandler.BatchSetFolder)
-				r.Post("/batch/tags", s.videoHandler.BatchSetTags)
-				r.Patch("/{id}", s.videoHandler.Update)
-				r.Delete("/{id}", s.videoHandler.Delete)
-				r.Post("/{id}/extend", s.videoHandler.Extend)
 				r.Get("/{id}/download", s.videoHandler.Download)
-				r.Post("/{id}/trim", s.videoHandler.Trim)
-				r.Post("/{id}/retranscribe", s.videoHandler.Retranscribe)
-				r.Put("/{id}/password", s.videoHandler.SetPassword)
-				r.Put("/{id}/comment-mode", s.videoHandler.SetCommentMode)
 				r.Get("/{id}/comments", s.videoHandler.ListOwnerComments)
-				r.Delete("/{id}/comments/{commentId}", s.videoHandler.DeleteComment)
 				r.Get("/{id}/analytics", s.videoHandler.Analytics)
 				r.Get("/{id}/analytics/export", s.videoHandler.AnalyticsExport)
-				r.Put("/{id}/notifications", s.videoHandler.SetVideoNotification)
-				r.Put("/{id}/download-enabled", s.videoHandler.SetDownloadEnabled)
-				r.Put("/{id}/link-expiry", s.videoHandler.SetLinkExpiry)
 				r.Get("/{id}/branding", s.videoHandler.GetVideoBranding)
 				r.Get("/{id}/transcript", s.videoHandler.GetTranscript)
-				r.Put("/{id}/branding", s.videoHandler.SetVideoBranding)
-				r.Post("/{id}/thumbnail", s.videoHandler.UploadThumbnail)
-				r.Delete("/{id}/thumbnail", s.videoHandler.ResetThumbnail)
-				r.Put("/{id}/cta", s.videoHandler.SetCTA)
-				r.Put("/{id}/email-gate", s.videoHandler.SetEmailGate)
-				r.Post("/{id}/summarize", s.videoHandler.Summarize)
-				r.Post("/{id}/generate-document", s.videoHandler.GenerateDocument)
-				r.Put("/{id}/folder", s.videoHandler.SetVideoFolder)
-				r.Put("/{id}/tags", s.videoHandler.SetVideoTags)
-			r.Post("/{id}/remove-segments", s.videoHandler.RemoveSegments)
-			r.Post("/{id}/detect-silence", s.videoHandler.DetectSilence)
-			r.Put("/{id}/dismiss-title", s.videoHandler.DismissTitle)
-			r.Put("/{id}/pin", s.videoHandler.TogglePin)
-				if s.integrationHandler != nil {
-					r.Post("/{id}/create-issue", s.integrationHandler.CreateIssue)
-				}
+
+				// Write routes (viewer blocked)
+				r.Group(func(r chi.Router) {
+					r.Use(organization.RequireWriter)
+					r.Post("/", s.videoHandler.Create)
+					r.Post("/upload", s.videoHandler.Upload)
+					r.Post("/batch/delete", s.videoHandler.BatchDelete)
+					r.Post("/batch/folder", s.videoHandler.BatchSetFolder)
+					r.Post("/batch/tags", s.videoHandler.BatchSetTags)
+					r.Patch("/{id}", s.videoHandler.Update)
+					r.Delete("/{id}", s.videoHandler.Delete)
+					r.Post("/{id}/extend", s.videoHandler.Extend)
+					r.Post("/{id}/trim", s.videoHandler.Trim)
+					r.Post("/{id}/retranscribe", s.videoHandler.Retranscribe)
+					r.Put("/{id}/password", s.videoHandler.SetPassword)
+					r.Put("/{id}/comment-mode", s.videoHandler.SetCommentMode)
+					r.Delete("/{id}/comments/{commentId}", s.videoHandler.DeleteComment)
+					r.Put("/{id}/notifications", s.videoHandler.SetVideoNotification)
+					r.Put("/{id}/download-enabled", s.videoHandler.SetDownloadEnabled)
+					r.Put("/{id}/link-expiry", s.videoHandler.SetLinkExpiry)
+					r.Put("/{id}/branding", s.videoHandler.SetVideoBranding)
+					r.Post("/{id}/thumbnail", s.videoHandler.UploadThumbnail)
+					r.Delete("/{id}/thumbnail", s.videoHandler.ResetThumbnail)
+					r.Put("/{id}/cta", s.videoHandler.SetCTA)
+					r.Put("/{id}/email-gate", s.videoHandler.SetEmailGate)
+					r.Post("/{id}/summarize", s.videoHandler.Summarize)
+					r.Post("/{id}/generate-document", s.videoHandler.GenerateDocument)
+					r.Put("/{id}/folder", s.videoHandler.SetVideoFolder)
+					r.Put("/{id}/tags", s.videoHandler.SetVideoTags)
+					r.Post("/{id}/remove-segments", s.videoHandler.RemoveSegments)
+					r.Post("/{id}/detect-silence", s.videoHandler.DetectSilence)
+					r.Put("/{id}/dismiss-title", s.videoHandler.DismissTitle)
+					r.Put("/{id}/pin", s.videoHandler.TogglePin)
+					r.Post("/{id}/transfer", s.videoHandler.Transfer)
+					if s.integrationHandler != nil {
+						r.Post("/{id}/create-issue", s.integrationHandler.CreateIssue)
+					}
+				})
 			})
 		})
 
