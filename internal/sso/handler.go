@@ -3,6 +3,7 @@ package sso
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
@@ -1064,4 +1065,111 @@ func (h *Handler) UnlinkIdentity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (h *Handler) ensureSCIMAdminAccess(w http.ResponseWriter, r *http.Request, orgID, userID string) bool {
+	var role, subscriptionPlan string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT om.role, o.subscription_plan
+		 FROM organization_members om
+		 JOIN organizations o ON o.id = om.organization_id
+		 WHERE om.organization_id = $1 AND om.user_id = $2`,
+		orgID, userID,
+	).Scan(&role, &subscriptionPlan)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			httputil.WriteError(w, http.StatusForbidden, "admin or owner role required")
+			return false
+		}
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to load organization access")
+		return false
+	}
+	if role != "owner" && role != "admin" {
+		httputil.WriteError(w, http.StatusForbidden, "admin or owner role required")
+		return false
+	}
+	if subscriptionPlan != "business" {
+		httputil.WriteError(w, http.StatusForbidden, "business plan required")
+		return false
+	}
+	return true
+}
+
+// GenerateSCIMToken creates a new SCIM bearer token for the organization,
+// replacing any existing token.
+func (h *Handler) GenerateSCIMToken(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	orgID := chi.URLParam(r, "orgId")
+	if !h.ensureSCIMAdminAccess(w, r, orgID, userID) {
+		return
+	}
+
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "generate token failed")
+		return
+	}
+	token := "scim_" + hex.EncodeToString(b)
+
+	hash := sha256.Sum256([]byte(token))
+	tokenHash := hex.EncodeToString(hash[:])
+
+	if _, err := h.db.Exec(r.Context(),
+		`INSERT INTO organization_scim_tokens (organization_id, token_hash)
+		 VALUES ($1, $2)
+		 ON CONFLICT (organization_id) DO UPDATE SET token_hash = EXCLUDED.token_hash, created_at = now()`,
+		orgID, tokenHash,
+	); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "save token failed")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"token": token})
+}
+
+// RevokeSCIMToken deletes the SCIM bearer token for the organization.
+func (h *Handler) RevokeSCIMToken(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	orgID := chi.URLParam(r, "orgId")
+	if !h.ensureSCIMAdminAccess(w, r, orgID, userID) {
+		return
+	}
+
+	if _, err := h.db.Exec(r.Context(),
+		"DELETE FROM organization_scim_tokens WHERE organization_id = $1",
+		orgID,
+	); err != nil {
+		httputil.WriteError(w, http.StatusInternalServerError, "revoke token failed")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"message": "SCIM token revoked"})
+}
+
+// GetSCIMToken returns whether a SCIM token is configured and when it was created.
+func (h *Handler) GetSCIMToken(w http.ResponseWriter, r *http.Request) {
+	userID := auth.UserIDFromContext(r.Context())
+	orgID := chi.URLParam(r, "orgId")
+	if !h.ensureSCIMAdminAccess(w, r, orgID, userID) {
+		return
+	}
+
+	var createdAt time.Time
+	err := h.db.QueryRow(r.Context(),
+		"SELECT created_at FROM organization_scim_tokens WHERE organization_id = $1",
+		orgID,
+	).Scan(&createdAt)
+	if err != nil {
+		if err != pgx.ErrNoRows {
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to load token status")
+			return
+		}
+		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"configured": false})
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{
+		"configured": true,
+		"createdAt":  createdAt,
+	})
 }

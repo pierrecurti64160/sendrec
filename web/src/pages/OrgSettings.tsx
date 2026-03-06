@@ -102,6 +102,13 @@ export function OrgSettings() {
   const [samlSsoUrl, setSamlSsoUrl] = useState("");
   const [spMetadataUrl, setSpMetadataUrl] = useState("");
 
+  const [scimConfigured, setScimConfigured] = useState(false);
+  const [scimCreatedAt, setScimCreatedAt] = useState("");
+  const [scimToken, setScimToken] = useState("");
+  const [scimGenerating, setScimGenerating] = useState(false);
+  const [scimError, setScimError] = useState("");
+  const [scimMessage, setScimMessage] = useState("");
+
   const [deleteError, setDeleteError] = useState("");
   const [deleting, setDeleting] = useState(false);
 
@@ -121,6 +128,14 @@ export function OrgSettings() {
 
   useEffect(() => {
     if (!orgId || !canManage || selectedOrgId !== orgId) return;
+
+    setLoading(true);
+    setError("");
+    setScimConfigured(false);
+    setScimCreatedAt("");
+    setScimToken("");
+    setScimError("");
+    setScimMessage("");
 
     Promise.all([
       apiFetch<OrgDetail>(`/api/organizations/${orgId}`),
@@ -162,11 +177,27 @@ export function OrgSettings() {
               }
             }
           } catch { /* SSO not available */ }
+
+          try {
+            const scimData = await apiFetch<{ configured: boolean; createdAt?: string }>(
+              `/api/organizations/${orgId}/scim-token`
+            );
+            if (scimData) {
+              setScimConfigured(scimData.configured);
+              setScimCreatedAt(scimData.createdAt || "");
+              setScimToken("");
+            }
+          } catch {
+            setScimConfigured(false);
+            setScimCreatedAt("");
+            setScimToken("");
+            setScimError("Failed to load SCIM status");
+          }
         }
       })
       .catch(() => setError("Failed to load workspace"))
       .finally(() => setLoading(false));
-  }, [orgId, canManage]);
+  }, [orgId, canManage, selectedOrgId]);
 
   async function handleGeneralSave(event: FormEvent) {
     event.preventDefault();
@@ -322,6 +353,62 @@ export function OrgSettings() {
           setBillingMessage(err instanceof Error ? err.message : "Failed to cancel");
         } finally {
           setCanceling(false);
+        }
+      },
+    });
+  }
+
+  async function handleGenerateScimToken() {
+    setScimError("");
+    setScimMessage("");
+    setScimToken("");
+    setScimGenerating(true);
+    try {
+      const resp = await apiFetch<{ token: string }>(
+        `/api/organizations/${orgId}/scim-token`,
+        { method: "POST" }
+      );
+      if (resp) {
+        setScimToken(resp.token);
+        setScimConfigured(true);
+        setScimCreatedAt(new Date().toISOString());
+        setScimMessage("Token generated. Copy it now — it won't be shown again.");
+      }
+    } catch (err) {
+      setScimError(err instanceof Error ? err.message : "Failed to generate token");
+    } finally {
+      setScimGenerating(false);
+    }
+  }
+
+  function handleRegenerateScimToken() {
+    setConfirmDialog({
+      message: "Regenerate SCIM token? The current token will stop working immediately.",
+      confirmLabel: "Regenerate",
+      danger: true,
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        await handleGenerateScimToken();
+      },
+    });
+  }
+
+  function handleRevokeScimToken() {
+    setConfirmDialog({
+      message: "Revoke SCIM token? Automated provisioning will stop working.",
+      confirmLabel: "Revoke",
+      danger: true,
+      onConfirm: async () => {
+        setConfirmDialog(null);
+        setScimError("");
+        try {
+          await apiFetch(`/api/organizations/${orgId}/scim-token`, { method: "DELETE" });
+          setScimConfigured(false);
+          setScimToken("");
+          setScimCreatedAt("");
+          setScimMessage("SCIM token revoked");
+        } catch (err) {
+          setScimError(err instanceof Error ? err.message : "Failed to revoke token");
         }
       },
     });
@@ -1005,6 +1092,115 @@ Attribute mapping (sent in SAML assertion):
             )}
           </div>
         </form>
+      )}
+
+      {canManage && (billing?.plan === "business" || org?.subscriptionPlan === "business") && (
+        <div className="card settings-section">
+          <h2>SCIM Provisioning</h2>
+          <p className="card-description">
+            Automatically provision and deprovision workspace members from your identity provider.
+          </p>
+
+          {scimError && <p className="form-error">{scimError}</p>}
+          {scimMessage && <p className="form-success">{scimMessage}</p>}
+
+          {scimConfigured ? (
+            <>
+              <div className="form-field">
+                <label className="form-label">Status</label>
+                <p>
+                  {scimCreatedAt
+                    ? `Active (created ${new Date(scimCreatedAt).toLocaleDateString()})`
+                    : "Active"}
+                </p>
+              </div>
+
+              <div className="form-field">
+                <label className="form-label">SCIM Base URL</label>
+                <div style={{ display: "flex", gap: "0.5rem" }}>
+                  <input
+                    type="text"
+                    className="form-input"
+                    readOnly
+                    value={`${window.location.origin}/api/organizations/${orgId}/scim/v2`}
+                  />
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={() => {
+                      navigator.clipboard.writeText(
+                        `${window.location.origin}/api/organizations/${orgId}/scim/v2`
+                      );
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+              </div>
+
+              {scimToken && (
+                <div className="form-field">
+                  <label className="form-label">Bearer Token</label>
+                  <div style={{ display: "flex", gap: "0.5rem" }}>
+                    <input type="text" className="form-input" readOnly value={scimToken} />
+                    <button
+                      type="button"
+                      className="btn"
+                      onClick={() => navigator.clipboard.writeText(scimToken)}
+                    >
+                      Copy
+                    </button>
+                  </div>
+                  <p className="form-hint">Copy this token now. It won't be shown again.</p>
+                </div>
+              )}
+
+              <details className="settings-details">
+                <summary>Setup Guide</summary>
+                <pre>{`SCIM Base URL:
+  ${window.location.origin}/api/organizations/${orgId}/scim/v2
+
+Authentication:
+  Authorization: Bearer <token>
+
+Okta:
+  In your Okta app -> Provisioning -> SCIM connector,
+  paste the Base URL and Bearer Token.
+
+Azure AD:
+  In Enterprise Applications -> your app -> Provisioning,
+  set Tenant URL to the Base URL and Secret Token to the Bearer Token.`}</pre>
+              </details>
+
+              <div className="btn-row" style={{ marginTop: "1rem" }}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={handleRegenerateScimToken}
+                  disabled={scimGenerating}
+                >
+                  {scimGenerating ? "Generating..." : "Regenerate Token"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn--danger"
+                  onClick={handleRevokeScimToken}
+                >
+                  Revoke Token
+                </button>
+              </div>
+            </>
+          ) : (
+            <button
+              type="button"
+              className="btn btn--primary"
+              onClick={handleGenerateScimToken}
+              disabled={scimGenerating}
+            >
+              {scimGenerating ? "Generating..." : "Generate SCIM Token"}
+            </button>
+          )}
+        </div>
       )}
 
       {isOwner && (
