@@ -59,6 +59,16 @@ func callWithChiParam(handler http.HandlerFunc, method, path, paramName, paramVa
 	return rec
 }
 
+// jsonEscape encodes a string as a JSON-safe value (with surrounding quotes).
+func jsonEscape(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+func strPtr(s string) *string {
+	return &s
+}
+
 func TestProviders_ReturnsEnabledList(t *testing.T) {
 	handler, mock := newTestHandler(t)
 	defer mock.Close()
@@ -515,10 +525,10 @@ func TestGetConfig_Success(t *testing.T) {
 	handler, mock := newTestHandlerWithKey(t)
 	defer mock.Close()
 
-	mock.ExpectQuery(`SELECT provider, issuer_url, client_id, enforce_sso FROM organization_sso_configs`).
+	mock.ExpectQuery(`SELECT provider, issuer_url, client_id, enforce_sso`).
 		WithArgs("org-1").
-		WillReturnRows(pgxmock.NewRows([]string{"provider", "issuer_url", "client_id", "enforce_sso"}).
-			AddRow("oidc", "https://accounts.google.com", "client-123", true))
+		WillReturnRows(pgxmock.NewRows([]string{"provider", "issuer_url", "client_id", "enforce_sso", "saml_metadata_url", "saml_entity_id", "saml_sso_url"}).
+			AddRow("oidc", strPtr("https://accounts.google.com"), strPtr("client-123"), true, nil, nil, nil))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sso/config", nil)
 	req = requestWithOrg(req, "org-1", "admin")
@@ -563,7 +573,7 @@ func TestGetConfig_NotConfigured(t *testing.T) {
 	handler, mock := newTestHandlerWithKey(t)
 	defer mock.Close()
 
-	mock.ExpectQuery(`SELECT provider, issuer_url, client_id, enforce_sso FROM organization_sso_configs`).
+	mock.ExpectQuery(`SELECT provider, issuer_url, client_id, enforce_sso`).
 		WithArgs("org-1").
 		WillReturnError(pgx.ErrNoRows)
 
@@ -584,6 +594,61 @@ func TestGetConfig_NotConfigured(t *testing.T) {
 
 	if resp.Configured {
 		t.Error("configured = true, want false")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestGetConfig_SAML(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	mock.ExpectQuery(`SELECT provider, issuer_url, client_id, enforce_sso`).
+		WithArgs("org-1").
+		WillReturnRows(pgxmock.NewRows([]string{"provider", "issuer_url", "client_id", "enforce_sso", "saml_metadata_url", "saml_entity_id", "saml_sso_url"}).
+			AddRow("saml", nil, nil, false, strPtr("https://idp.example.com/metadata"), strPtr("https://idp.example.com"), strPtr("https://idp.example.com/sso")))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sso/config", nil)
+	req = requestWithOrg(req, "org-1", "admin")
+
+	rec := httptest.NewRecorder()
+	handler.GetConfig(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp ssoConfigResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if !resp.Configured {
+		t.Error("configured = false, want true")
+	}
+	if resp.Provider != "saml" {
+		t.Errorf("provider = %q, want %q", resp.Provider, "saml")
+	}
+	if resp.SAMLMetadataURL != "https://idp.example.com/metadata" {
+		t.Errorf("samlMetadataUrl = %q, want %q", resp.SAMLMetadataURL, "https://idp.example.com/metadata")
+	}
+	if resp.SAMLEntityID != "https://idp.example.com" {
+		t.Errorf("samlEntityId = %q, want %q", resp.SAMLEntityID, "https://idp.example.com")
+	}
+	if resp.SAMLSSOURL != "https://idp.example.com/sso" {
+		t.Errorf("samlSsoUrl = %q, want %q", resp.SAMLSSOURL, "https://idp.example.com/sso")
+	}
+	if resp.SPMetadataURL != testBaseURL+"/api/auth/saml/org-1/metadata" {
+		t.Errorf("spMetadataUrl = %q, want %q", resp.SPMetadataURL, testBaseURL+"/api/auth/saml/org-1/metadata")
+	}
+	// OIDC fields should be empty for SAML config.
+	if resp.IssuerURL != "" {
+		t.Errorf("issuerUrl = %q, want empty", resp.IssuerURL)
+	}
+	if resp.ClientSecret != "" {
+		t.Errorf("clientSecret = %q, want empty", resp.ClientSecret)
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -663,7 +728,7 @@ func TestInitiateOrgSSO_NoConfig(t *testing.T) {
 	handler, mock := newTestHandlerWithKey(t)
 	defer mock.Close()
 
-	mock.ExpectQuery(`SELECT o.id, c.issuer_url, c.client_id, c.client_secret_encrypted`).
+	mock.ExpectQuery(`SELECT o.id, c.provider, c.issuer_url, c.client_id, c.client_secret_encrypted`).
 		WithArgs("user@example.com").
 		WillReturnError(pgx.ErrNoRows)
 
@@ -674,6 +739,66 @@ func TestInitiateOrgSSO_NoConfig(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestInitiateOrgSSO_SAML(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	// Parse the test metadata to get a valid certificate for the mock row.
+	samlCfg, err := ParseSAMLMetadataFromXML([]byte(testSAMLMetadataXML))
+	if err != nil {
+		t.Fatalf("parse test metadata: %v", err)
+	}
+
+	entityID := samlCfg.EntityID
+	ssoURL := samlCfg.SSOURL
+	cert := samlCfg.Certificate
+	mock.ExpectQuery(`SELECT o.id, c.provider, c.issuer_url, c.client_id, c.client_secret_encrypted`).
+		WithArgs("user@example.com").
+		WillReturnRows(pgxmock.NewRows([]string{
+			"id", "provider", "issuer_url", "client_id", "client_secret_encrypted",
+			"saml_entity_id", "saml_sso_url", "saml_certificate",
+		}).AddRow("org-1", "saml", (*string)(nil), (*string)(nil), (*string)(nil),
+			&entityID, &ssoURL, &cert))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sso/org/initiate?email=user@example.com", nil)
+	rec := httptest.NewRecorder()
+	handler.InitiateOrgSSO(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusFound, rec.Body.String())
+	}
+
+	location := rec.Header().Get("Location")
+	if !strings.Contains(location, samlCfg.SSOURL) {
+		t.Fatalf("Location = %q, want to contain IdP SSO URL %q", location, samlCfg.SSOURL)
+	}
+
+	// Verify the sso_state cookie was set with SameSite=None and contains state|requestID.
+	var foundStateCookie bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "sso_state" {
+			foundStateCookie = true
+			if c.SameSite != http.SameSiteNoneMode {
+				t.Errorf("sso_state cookie SameSite = %d, want SameSiteNoneMode (%d)", c.SameSite, http.SameSiteNoneMode)
+			}
+			if !c.Secure {
+				t.Error("sso_state cookie Secure = false, want true")
+			}
+			parts := strings.SplitN(c.Value, "|", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				t.Errorf("sso_state cookie value = %q, want 'state|requestID' format", c.Value)
+			}
+		}
+	}
+	if !foundStateCookie {
+		t.Error("sso_state cookie not set")
 	}
 
 	if err := mock.ExpectationsWereMet(); err != nil {
@@ -992,6 +1117,200 @@ func TestOrgCallback_ClearsStateCookies(t *testing.T) {
 
 // --- Additional SSO Config Tests ---
 
+// --- OrgSAMLCallback Tests ---
+
+func TestOrgSAMLCallback_MissingStateCookie(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	body := "SAMLResponse=dGVzdA==&RelayState=some-state"
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/saml/org-1/acs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("orgId", "org-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	rec := httptest.NewRecorder()
+	handler.OrgSAMLCallback(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusFound)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.Contains(location, "sso_error=") {
+		t.Fatalf("Location = %q, want sso_error=", location)
+	}
+}
+
+func TestOrgSAMLCallback_StateMismatch(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	body := "SAMLResponse=dGVzdA==&RelayState=wrong-state"
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/saml/org-1/acs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "sso_state", Value: "correct-state"})
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("orgId", "org-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	rec := httptest.NewRecorder()
+	handler.OrgSAMLCallback(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusFound)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.Contains(location, "sso_error=") {
+		t.Fatalf("Location = %q, want sso_error=", location)
+	}
+}
+
+func TestOrgSAMLCallback_ConfigNotFound(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	mock.ExpectQuery(`SELECT provider, saml_entity_id, saml_sso_url, saml_certificate`).
+		WithArgs("org-1").
+		WillReturnError(pgx.ErrNoRows)
+
+	state := "valid-saml-state"
+	body := "SAMLResponse=dGVzdA==&RelayState=" + state
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/saml/org-1/acs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "sso_state", Value: state})
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("orgId", "org-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	rec := httptest.NewRecorder()
+	handler.OrgSAMLCallback(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusFound)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.Contains(location, "sso_error=") {
+		t.Fatalf("Location = %q, want sso_error=", location)
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestOrgSAMLCallback_NotSAMLConfig(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	mock.ExpectQuery(`SELECT provider, saml_entity_id, saml_sso_url, saml_certificate`).
+		WithArgs("org-1").
+		WillReturnRows(pgxmock.NewRows([]string{"provider", "saml_entity_id", "saml_sso_url", "saml_certificate"}).
+			AddRow("oidc", nil, nil, nil))
+
+	state := "valid-saml-state"
+	body := "SAMLResponse=dGVzdA==&RelayState=" + state
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/saml/org-1/acs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.AddCookie(&http.Cookie{Name: "sso_state", Value: state})
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("orgId", "org-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	rec := httptest.NewRecorder()
+	handler.OrgSAMLCallback(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusFound)
+	}
+	location := rec.Header().Get("Location")
+	if !strings.Contains(location, "sso_error=") {
+		t.Fatalf("Location = %q, want sso_error=", location)
+	}
+	if !strings.Contains(location, "not+SAML") || !strings.Contains(location, "not%20SAML") {
+		// Check for either URL encoding form.
+		if !strings.Contains(location, "not+SAML") && !strings.Contains(location, "not%20SAML") {
+			t.Fatalf("Location = %q, want 'not SAML' in error", location)
+		}
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+// --- SPMetadata Tests ---
+
+func TestSPMetadata_ReturnsXML(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	// Parse test metadata to get the certificate.
+	cfg, err := ParseSAMLMetadataFromXML([]byte(testSAMLMetadataXML))
+	if err != nil {
+		t.Fatalf("parse test metadata: %v", err)
+	}
+
+	mock.ExpectQuery(`SELECT saml_entity_id, saml_sso_url, saml_certificate`).
+		WithArgs("org-1").
+		WillReturnRows(pgxmock.NewRows([]string{"saml_entity_id", "saml_sso_url", "saml_certificate"}).
+			AddRow(strPtr(cfg.EntityID), strPtr(cfg.SSOURL), strPtr(cfg.Certificate)))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/saml/org-1/metadata", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("orgId", "org-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	rec := httptest.NewRecorder()
+	handler.SPMetadata(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	contentType := rec.Header().Get("Content-Type")
+	if contentType != "application/samlmetadata+xml" {
+		t.Errorf("Content-Type = %q, want %q", contentType, "application/samlmetadata+xml")
+	}
+
+	body := rec.Body.String()
+	if !strings.Contains(body, "EntityDescriptor") {
+		t.Errorf("response body does not contain EntityDescriptor: %s", body[:min(200, len(body))])
+	}
+	if !strings.Contains(body, "AssertionConsumerService") {
+		t.Errorf("response body does not contain AssertionConsumerService: %s", body[:min(200, len(body))])
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestSPMetadata_NotFound(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	mock.ExpectQuery(`SELECT saml_entity_id, saml_sso_url, saml_certificate`).
+		WithArgs("org-1").
+		WillReturnError(pgx.ErrNoRows)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/saml/org-1/metadata", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("orgId", "org-1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	rec := httptest.NewRecorder()
+	handler.SPMetadata(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestSaveConfig_WithEnforcement(t *testing.T) {
 	handler, mock := newTestHandlerWithKey(t)
 	defer mock.Close()
@@ -1040,6 +1359,66 @@ func TestSaveConfig_ViewerBlocked(t *testing.T) {
 	}
 }
 
+func TestSaveConfig_SAML_MetadataXML(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	mock.ExpectQuery(`SELECT role FROM organization_members`).
+		WithArgs("org-1", "user-1").
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+
+	mock.ExpectExec(`INSERT INTO organization_sso_configs`).
+		WithArgs("org-1", false, "", "https://idp.example.com", "https://idp.example.com/sso", pgxmock.AnyArg(), testSAMLMetadataXML).
+		WillReturnResult(pgxmock.NewResult("INSERT", 1))
+
+	body := `{"provider":"saml","samlMetadataXml":` + jsonEscape(testSAMLMetadataXML) + `}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sso/config", strings.NewReader(body))
+	req = requestWithOrg(req, "org-1", "admin")
+
+	rec := httptest.NewRecorder()
+	handler.SaveConfig(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+
+	var resp map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["status"] != "ok" {
+		t.Errorf("status = %q, want %q", resp["status"], "ok")
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
+func TestSaveConfig_SAML_MissingMetadata(t *testing.T) {
+	handler, mock := newTestHandlerWithKey(t)
+	defer mock.Close()
+
+	mock.ExpectQuery(`SELECT role FROM organization_members`).
+		WithArgs("org-1", "user-1").
+		WillReturnRows(pgxmock.NewRows([]string{"role"}).AddRow("admin"))
+
+	body := `{"provider":"saml"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sso/config", strings.NewReader(body))
+	req = requestWithOrg(req, "org-1", "admin")
+
+	rec := httptest.NewRecorder()
+	handler.SaveConfig(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet expectations: %v", err)
+	}
+}
+
 func TestOrgCallback_Success(t *testing.T) {
 	server, _ := newOIDCTestServer(t)
 	defer server.Close()
@@ -1052,11 +1431,13 @@ func TestOrgCallback_Success(t *testing.T) {
 		t.Fatalf("encrypt client secret: %v", err)
 	}
 
-	// Load SSO config for the organization.
+	// Load SSO config for the organization (columns are nullable since migration 000056).
+	issuerURL := server.URL
+	clientID := "test-client-id"
 	mock.ExpectQuery(`SELECT issuer_url, client_id, client_secret_encrypted FROM organization_sso_configs`).
 		WithArgs("org-1").
 		WillReturnRows(pgxmock.NewRows([]string{"issuer_url", "client_id", "client_secret_encrypted"}).
-			AddRow(server.URL, "test-client-id", encryptedSecret))
+			AddRow(&issuerURL, &clientID, &encryptedSecret))
 
 	// resolveUser: external identity lookup -- not found.
 	mock.ExpectQuery(`SELECT user_id FROM external_identities WHERE provider = \$1 AND external_id = \$2`).

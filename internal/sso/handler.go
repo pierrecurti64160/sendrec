@@ -5,11 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -277,22 +279,30 @@ func newTokenID() (string, error) {
 }
 
 type ssoConfigRequest struct {
-	IssuerURL    string `json:"issuerUrl"`
-	ClientID     string `json:"clientId"`
-	ClientSecret string `json:"clientSecret"`
-	EnforceSSO   bool   `json:"enforceSso"`
+	Provider        string `json:"provider"`
+	IssuerURL       string `json:"issuerUrl"`
+	ClientID        string `json:"clientId"`
+	ClientSecret    string `json:"clientSecret"`
+	EnforceSSO      bool   `json:"enforceSso"`
+	SAMLMetadataURL string `json:"samlMetadataUrl"`
+	SAMLMetadataXML string `json:"samlMetadataXml"`
 }
 
 type ssoConfigResponse struct {
-	Provider     string `json:"provider"`
-	IssuerURL    string `json:"issuerUrl"`
-	ClientID     string `json:"clientId"`
-	ClientSecret string `json:"clientSecret"`
-	EnforceSSO   bool   `json:"enforceSso"`
-	Configured   bool   `json:"configured"`
+	Provider        string `json:"provider"`
+	IssuerURL       string `json:"issuerUrl,omitempty"`
+	ClientID        string `json:"clientId,omitempty"`
+	ClientSecret    string `json:"clientSecret,omitempty"`
+	EnforceSSO      bool   `json:"enforceSso"`
+	Configured      bool   `json:"configured"`
+	SAMLMetadataURL string `json:"samlMetadataUrl,omitempty"`
+	SAMLEntityID    string `json:"samlEntityId,omitempty"`
+	SAMLSSOURL      string `json:"samlSsoUrl,omitempty"`
+	SPMetadataURL   string `json:"spMetadataUrl,omitempty"`
 }
 
 // SaveConfig upserts the workspace SSO configuration for the caller's organization.
+// It dispatches to saveOIDCConfig or saveSAMLConfig based on the provider field.
 func (h *Handler) SaveConfig(w http.ResponseWriter, r *http.Request) {
 	userID := auth.UserIDFromContext(r.Context())
 	orgID := chi.URLParam(r, "orgId")
@@ -313,6 +323,15 @@ func (h *Handler) SaveConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Provider == "saml" {
+		h.saveSAMLConfig(w, r, orgID, &req)
+		return
+	}
+
+	h.saveOIDCConfig(w, r, orgID, &req)
+}
+
+func (h *Handler) saveOIDCConfig(w http.ResponseWriter, r *http.Request, orgID string, req *ssoConfigRequest) {
 	if req.IssuerURL == "" || req.ClientID == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "issuer_url and client_id are required")
 		return
@@ -340,13 +359,20 @@ func (h *Handler) SaveConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := h.db.Exec(r.Context(),
-		`INSERT INTO organization_sso_configs (organization_id, provider, issuer_url, client_id, client_secret_encrypted, enforce_sso)
-		 VALUES ($1, 'oidc', $2, $3, $4, $5)
+		`INSERT INTO organization_sso_configs (organization_id, provider, issuer_url, client_id, client_secret_encrypted, enforce_sso,
+		     saml_metadata_url, saml_entity_id, saml_sso_url, saml_certificate, saml_metadata_xml)
+		 VALUES ($1, 'oidc', $2, $3, $4, $5, NULL, NULL, NULL, NULL, NULL)
 		 ON CONFLICT (organization_id) DO UPDATE
-		 SET issuer_url = EXCLUDED.issuer_url,
+		 SET provider = 'oidc',
+		     issuer_url = EXCLUDED.issuer_url,
 		     client_id = EXCLUDED.client_id,
 		     client_secret_encrypted = EXCLUDED.client_secret_encrypted,
 		     enforce_sso = EXCLUDED.enforce_sso,
+		     saml_metadata_url = NULL,
+		     saml_entity_id = NULL,
+		     saml_sso_url = NULL,
+		     saml_certificate = NULL,
+		     saml_metadata_xml = NULL,
 		     updated_at = now()`,
 		orgID, req.IssuerURL, req.ClientID, encryptedSecret, req.EnforceSSO,
 	); err != nil {
@@ -358,16 +384,74 @@ func (h *Handler) SaveConfig(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *Handler) saveSAMLConfig(w http.ResponseWriter, r *http.Request, orgID string, req *ssoConfigRequest) {
+	if req.SAMLMetadataURL == "" && req.SAMLMetadataXML == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "saml_metadata_url or saml_metadata_xml is required")
+		return
+	}
+
+	var cfg *SAMLConfig
+	var metadataXML string
+	if req.SAMLMetadataXML != "" {
+		var err error
+		cfg, err = ParseSAMLMetadataFromXML([]byte(req.SAMLMetadataXML))
+		if err != nil {
+			slog.Error("sso: failed to parse SAML metadata XML", "error", err)
+			httputil.WriteError(w, http.StatusBadRequest, "invalid SAML metadata XML")
+			return
+		}
+		metadataXML = req.SAMLMetadataXML
+	} else {
+		var err error
+		cfg, err = ParseSAMLMetadataFromURL(req.SAMLMetadataURL)
+		if err != nil {
+			slog.Error("sso: failed to fetch SAML metadata", "error", err)
+			httputil.WriteError(w, http.StatusBadRequest, "failed to fetch SAML metadata from URL")
+			return
+		}
+	}
+
+	if _, err := h.db.Exec(r.Context(),
+		`INSERT INTO organization_sso_configs (organization_id, provider, enforce_sso,
+		     saml_metadata_url, saml_entity_id, saml_sso_url, saml_certificate, saml_metadata_xml,
+		     issuer_url, client_id, client_secret_encrypted)
+		 VALUES ($1, 'saml', $2, $3, $4, $5, $6, $7, NULL, NULL, NULL)
+		 ON CONFLICT (organization_id) DO UPDATE
+		 SET provider = 'saml',
+		     enforce_sso = EXCLUDED.enforce_sso,
+		     saml_metadata_url = EXCLUDED.saml_metadata_url,
+		     saml_entity_id = EXCLUDED.saml_entity_id,
+		     saml_sso_url = EXCLUDED.saml_sso_url,
+		     saml_certificate = EXCLUDED.saml_certificate,
+		     saml_metadata_xml = EXCLUDED.saml_metadata_xml,
+		     issuer_url = NULL,
+		     client_id = NULL,
+		     client_secret_encrypted = NULL,
+		     updated_at = now()`,
+		orgID, req.EnforceSSO, req.SAMLMetadataURL, cfg.EntityID, cfg.SSOURL, cfg.Certificate, metadataXML,
+	); err != nil {
+		slog.Error("sso: failed to upsert SAML config", "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to save SSO config")
+		return
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // GetConfig returns the workspace SSO configuration for the caller's organization.
 func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	orgID := chi.URLParam(r, "orgId")
 
-	var provider, issuerURL, clientID string
+	var provider string
+	var issuerURL, clientID, samlMetadataURL, samlEntityID, samlSSOURL *string
 	var enforceSSO bool
 	err := h.db.QueryRow(r.Context(),
-		"SELECT provider, issuer_url, client_id, enforce_sso FROM organization_sso_configs WHERE organization_id = $1",
+		`SELECT provider, issuer_url, client_id, enforce_sso,
+		        saml_metadata_url, saml_entity_id, saml_sso_url
+		 FROM organization_sso_configs WHERE organization_id = $1`,
 		orgID,
-	).Scan(&provider, &issuerURL, &clientID, &enforceSSO)
+	).Scan(&provider, &issuerURL, &clientID, &enforceSSO,
+		&samlMetadataURL, &samlEntityID, &samlSSOURL)
 	if err != nil {
 		if err == pgx.ErrNoRows {
 			httputil.WriteJSON(w, http.StatusOK, ssoConfigResponse{Configured: false})
@@ -378,14 +462,34 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	httputil.WriteJSON(w, http.StatusOK, ssoConfigResponse{
-		Provider:     provider,
-		IssuerURL:    issuerURL,
-		ClientID:     clientID,
-		ClientSecret: "******",
-		EnforceSSO:   enforceSSO,
-		Configured:   true,
-	})
+	resp := ssoConfigResponse{
+		Provider:   provider,
+		EnforceSSO: enforceSSO,
+		Configured: true,
+	}
+
+	if provider == "saml" {
+		if samlMetadataURL != nil {
+			resp.SAMLMetadataURL = *samlMetadataURL
+		}
+		if samlEntityID != nil {
+			resp.SAMLEntityID = *samlEntityID
+		}
+		if samlSSOURL != nil {
+			resp.SAMLSSOURL = *samlSSOURL
+		}
+		resp.SPMetadataURL = h.baseURL + "/api/auth/saml/" + orgID + "/metadata"
+	} else {
+		if issuerURL != nil {
+			resp.IssuerURL = *issuerURL
+		}
+		if clientID != nil {
+			resp.ClientID = *clientID
+		}
+		resp.ClientSecret = "******"
+	}
+
+	httputil.WriteJSON(w, http.StatusOK, resp)
 }
 
 // DeleteConfig removes the workspace SSO configuration for the caller's organization.
@@ -417,7 +521,7 @@ func (h *Handler) DeleteConfig(w http.ResponseWriter, r *http.Request) {
 
 // InitiateOrgSSO starts the SSO flow for a user based on their email's
 // organization membership. It looks up the SSO config for the organization
-// the user belongs to and redirects to the OIDC provider.
+// the user belongs to and redirects to the identity provider.
 // If orgId is provided, it scopes the lookup to that specific organization.
 func (h *Handler) InitiateOrgSSO(w http.ResponseWriter, r *http.Request) {
 	email := r.URL.Query().Get("email")
@@ -426,39 +530,103 @@ func (h *Handler) InitiateOrgSSO(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var orgID, issuerURL, clientID, encryptedSecret string
+	var orgID string
+	var configProvider string
+	var issuerURL, clientID, encryptedSecret *string
+	var samlEntityID, samlSSOURL, samlCertificate *string
+
 	orgFilter := r.URL.Query().Get("org")
 	if orgFilter != "" {
 		err := h.db.QueryRow(r.Context(),
-			`SELECT o.id, c.issuer_url, c.client_id, c.client_secret_encrypted
+			`SELECT o.id, c.provider, c.issuer_url, c.client_id, c.client_secret_encrypted,
+			        c.saml_entity_id, c.saml_sso_url, c.saml_certificate
 			 FROM organization_sso_configs c
 			 JOIN organizations o ON o.id = c.organization_id
 			 JOIN organization_members m ON m.organization_id = o.id
 			 JOIN users u ON u.id = m.user_id
 			 WHERE u.email = $1 AND o.id = $2`,
 			email, orgFilter,
-		).Scan(&orgID, &issuerURL, &clientID, &encryptedSecret)
+		).Scan(&orgID, &configProvider, &issuerURL, &clientID, &encryptedSecret,
+			&samlEntityID, &samlSSOURL, &samlCertificate)
 		if err != nil {
 			httputil.WriteError(w, http.StatusNotFound, "no SSO configuration found for this workspace")
 			return
 		}
 	} else {
 		err := h.db.QueryRow(r.Context(),
-			`SELECT o.id, c.issuer_url, c.client_id, c.client_secret_encrypted
+			`SELECT o.id, c.provider, c.issuer_url, c.client_id, c.client_secret_encrypted,
+			        c.saml_entity_id, c.saml_sso_url, c.saml_certificate
 			 FROM organization_sso_configs c
 			 JOIN organizations o ON o.id = c.organization_id
 			 JOIN organization_members m ON m.organization_id = o.id
 			 JOIN users u ON u.id = m.user_id
 			 WHERE u.email = $1 LIMIT 1`,
 			email,
-		).Scan(&orgID, &issuerURL, &clientID, &encryptedSecret)
+		).Scan(&orgID, &configProvider, &issuerURL, &clientID, &encryptedSecret,
+			&samlEntityID, &samlSSOURL, &samlCertificate)
 		if err != nil {
 			httputil.WriteError(w, http.StatusNotFound, "no SSO configuration found for this email")
 			return
 		}
 	}
 
-	clientSecret, err := integration.Decrypt(h.encryptionKey, encryptedSecret)
+	state, err := generateState()
+	if err != nil {
+		slog.Error("sso: failed to generate state", "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to initiate SSO")
+		return
+	}
+
+	if configProvider == "saml" {
+		if samlEntityID == nil || samlSSOURL == nil || samlCertificate == nil {
+			slog.Error("sso: incomplete SAML config", "orgID", orgID)
+			httputil.WriteError(w, http.StatusInternalServerError, "incomplete SAML configuration")
+			return
+		}
+
+		samlProvider, err := NewSAMLProvider(h.baseURL, orgID, &SAMLConfig{
+			EntityID:    *samlEntityID,
+			SSOURL:      *samlSSOURL,
+			Certificate: *samlCertificate,
+		})
+		if err != nil {
+			slog.Error("sso: failed to create SAML provider", "error", err)
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to initiate SSO")
+			return
+		}
+
+		redirectURL, requestID, err := samlProvider.AuthRequestURL(state)
+		if err != nil {
+			slog.Error("sso: failed to build SAML AuthnRequest", "error", err)
+			httputil.WriteError(w, http.StatusInternalServerError, "failed to initiate SSO")
+			return
+		}
+
+		// Store state + requestID in cookie. The requestID is needed for
+		// InResponseTo validation when the IdP POSTs back to the ACS.
+		// SameSite=None is required because the IdP POSTs back cross-origin.
+		http.SetCookie(w, &http.Cookie{
+			Name:     "sso_state",
+			Value:    state + "|" + requestID,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteNoneMode,
+			MaxAge:   300,
+		})
+
+		http.Redirect(w, r, redirectURL, http.StatusFound)
+		return
+	}
+
+	// OIDC flow.
+	if issuerURL == nil || clientID == nil || encryptedSecret == nil {
+		slog.Error("sso: incomplete OIDC config", "orgID", orgID)
+		httputil.WriteError(w, http.StatusInternalServerError, "incomplete OIDC configuration")
+		return
+	}
+
+	clientSecret, err := integration.Decrypt(h.encryptionKey, *encryptedSecret)
 	if err != nil {
 		slog.Error("sso: failed to decrypt client secret", "error", err)
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to initiate SSO")
@@ -466,20 +634,13 @@ func (h *Handler) InitiateOrgSSO(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider, err := NewOIDCProvider(r.Context(), OIDCConfig{
-		IssuerURL:    issuerURL,
-		ClientID:     clientID,
+		IssuerURL:    *issuerURL,
+		ClientID:     *clientID,
 		ClientSecret: clientSecret,
 		RedirectURL:  h.baseURL + "/api/auth/sso/org/callback",
 	})
 	if err != nil {
 		slog.Error("sso: failed to create OIDC provider", "error", err)
-		httputil.WriteError(w, http.StatusInternalServerError, "failed to initiate SSO")
-		return
-	}
-
-	state, err := generateState()
-	if err != nil {
-		slog.Error("sso: failed to generate state", "error", err)
 		httputil.WriteError(w, http.StatusInternalServerError, "failed to initiate SSO")
 		return
 	}
@@ -558,8 +719,8 @@ func (h *Handler) OrgCallback(w http.ResponseWriter, r *http.Request) {
 
 	orgID := orgCookie.Value
 
-	// Load SSO config for the organization.
-	var issuerURL, clientID, encryptedSecret string
+	// Load SSO config for the organization (OIDC columns are nullable since migration 000056).
+	var issuerURL, clientID, encryptedSecret *string
 	err = h.db.QueryRow(r.Context(),
 		"SELECT issuer_url, client_id, client_secret_encrypted FROM organization_sso_configs WHERE organization_id = $1",
 		orgID,
@@ -570,7 +731,12 @@ func (h *Handler) OrgCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientSecret, err := integration.Decrypt(h.encryptionKey, encryptedSecret)
+	if issuerURL == nil || clientID == nil || encryptedSecret == nil {
+		h.redirectWithError(w, r, "SSO configuration is not OIDC")
+		return
+	}
+
+	clientSecret, err := integration.Decrypt(h.encryptionKey, *encryptedSecret)
 	if err != nil {
 		slog.Error("sso: failed to decrypt client secret", "error", err)
 		h.redirectWithError(w, r, "authentication failed")
@@ -578,8 +744,8 @@ func (h *Handler) OrgCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider, err := NewOIDCProvider(r.Context(), OIDCConfig{
-		IssuerURL:    issuerURL,
-		ClientID:     clientID,
+		IssuerURL:    *issuerURL,
+		ClientID:     *clientID,
 		ClientSecret: clientSecret,
 		RedirectURL:  h.baseURL + "/api/auth/sso/org/callback",
 	})
@@ -622,6 +788,174 @@ func (h *Handler) OrgCallback(w http.ResponseWriter, r *http.Request) {
 	h.setRefreshTokenCookie(w, refreshToken)
 	redirectURL := h.baseURL + "/login?sso_token=" + url.QueryEscape(accessToken)
 	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
+// OrgSAMLCallback handles the SAML ACS (Assertion Consumer Service) POST for
+// workspace SSO login. It validates the RelayState against the sso_state cookie,
+// loads the SAML config, validates the SAMLResponse, resolves the user,
+// auto-provisions organization membership, and issues tokens.
+func (h *Handler) OrgSAMLCallback(w http.ResponseWriter, r *http.Request) {
+	orgID := chi.URLParam(r, "orgId")
+
+	if err := r.ParseForm(); err != nil {
+		h.redirectWithError(w, r, "invalid form data")
+		return
+	}
+
+	samlResponse := r.FormValue("SAMLResponse")
+	relayState := r.FormValue("RelayState")
+
+	stateCookie, err := r.Cookie("sso_state")
+	if err != nil {
+		h.redirectWithError(w, r, "missing state cookie")
+		return
+	}
+
+	// Clear the state cookie immediately (must match SameSite=None from initiation).
+	http.SetCookie(w, &http.Cookie{
+		Name:     "sso_state",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteNoneMode,
+		MaxAge:   -1,
+	})
+
+	// Cookie value is "state|requestID" — split to extract both.
+	cookieParts := strings.SplitN(stateCookie.Value, "|", 2)
+	cookieState := cookieParts[0]
+	var samlRequestID string
+	if len(cookieParts) == 2 {
+		samlRequestID = cookieParts[1]
+	}
+
+	if relayState == "" || relayState != cookieState {
+		h.redirectWithError(w, r, "invalid state parameter")
+		return
+	}
+
+	// Load SAML config for the organization.
+	var configProvider string
+	var samlEntityID, samlSSOURL, samlCertificate *string
+	err = h.db.QueryRow(r.Context(),
+		`SELECT provider, saml_entity_id, saml_sso_url, saml_certificate
+		 FROM organization_sso_configs WHERE organization_id = $1`,
+		orgID,
+	).Scan(&configProvider, &samlEntityID, &samlSSOURL, &samlCertificate)
+	if err != nil {
+		slog.Error("sso: SAML callback config not found", "orgID", orgID, "error", err)
+		h.redirectWithError(w, r, "SSO configuration not found")
+		return
+	}
+
+	if configProvider != "saml" {
+		h.redirectWithError(w, r, "SSO configuration is not SAML")
+		return
+	}
+
+	if samlEntityID == nil || samlSSOURL == nil || samlCertificate == nil {
+		slog.Error("sso: incomplete SAML config for callback", "orgID", orgID)
+		h.redirectWithError(w, r, "incomplete SAML configuration")
+		return
+	}
+
+	samlProvider, err := NewSAMLProvider(h.baseURL, orgID, &SAMLConfig{
+		EntityID:    *samlEntityID,
+		SSOURL:      *samlSSOURL,
+		Certificate: *samlCertificate,
+	})
+	if err != nil {
+		slog.Error("sso: failed to create SAML provider for callback", "error", err)
+		h.redirectWithError(w, r, "authentication failed")
+		return
+	}
+
+	info, err := samlProvider.ExchangeWithRequestID(r.Context(), samlResponse, samlRequestID)
+	if err != nil {
+		slog.Error("sso: SAML exchange failed", "orgID", orgID, "error", err)
+		h.redirectWithError(w, r, "authentication failed")
+		return
+	}
+
+	userID, err := h.resolveUser(r.Context(), orgID, info)
+	if err != nil {
+		slog.Error("sso: SAML resolve user failed", "orgID", orgID, "error", err)
+		h.redirectWithError(w, r, err.Error())
+		return
+	}
+
+	// Auto-add user as organization member.
+	if _, err := h.db.Exec(r.Context(),
+		"INSERT INTO organization_members (organization_id, user_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING",
+		orgID, userID,
+	); err != nil {
+		slog.Error("sso: failed to add org member", "orgID", orgID, "userID", userID, "error", err)
+	}
+
+	accessToken, refreshToken, err := h.issueTokens(r.Context(), userID)
+	if err != nil {
+		slog.Error("sso: SAML issue tokens failed", "error", err)
+		h.redirectWithError(w, r, "failed to create session")
+		return
+	}
+
+	h.setRefreshTokenCookie(w, refreshToken)
+	redirectURL := h.baseURL + "/login?sso_token=" + url.QueryEscape(accessToken)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
+// SPMetadata serves the SAML Service Provider metadata XML for the given
+// organization. Identity providers use this to configure their side of the
+// SAML trust relationship.
+func (h *Handler) SPMetadata(w http.ResponseWriter, r *http.Request) {
+	orgID := chi.URLParam(r, "orgId")
+
+	var samlEntityID, samlSSOURL, samlCertificate *string
+	err := h.db.QueryRow(r.Context(),
+		`SELECT saml_entity_id, saml_sso_url, saml_certificate
+		 FROM organization_sso_configs
+		 WHERE organization_id = $1 AND provider = 'saml'`,
+		orgID,
+	).Scan(&samlEntityID, &samlSSOURL, &samlCertificate)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			httputil.WriteError(w, http.StatusNotFound, "SAML configuration not found")
+			return
+		}
+		slog.Error("sso: failed to load SAML config for SP metadata", "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to load SAML configuration")
+		return
+	}
+
+	if samlEntityID == nil || samlSSOURL == nil || samlCertificate == nil {
+		httputil.WriteError(w, http.StatusNotFound, "incomplete SAML configuration")
+		return
+	}
+
+	samlProvider, err := NewSAMLProvider(h.baseURL, orgID, &SAMLConfig{
+		EntityID:    *samlEntityID,
+		SSOURL:      *samlSSOURL,
+		Certificate: *samlCertificate,
+	})
+	if err != nil {
+		slog.Error("sso: failed to create SAML provider for SP metadata", "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate SP metadata")
+		return
+	}
+
+	metadata := samlProvider.sp.Metadata()
+	xmlBytes, err := xml.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		slog.Error("sso: failed to marshal SP metadata", "error", err)
+		httputil.WriteError(w, http.StatusInternalServerError, "failed to generate SP metadata")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/samlmetadata+xml")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(xml.Header))
+	_, _ = w.Write(xmlBytes)
 }
 
 type identityResponse struct {
