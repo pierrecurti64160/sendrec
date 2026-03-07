@@ -4,8 +4,8 @@ name: SendRec
 applicationSuite: SendRec
 url: "https://github.com/sendrec/sendrec"
 landingURL: "https://sendrec.eu"
-softwareVersion: "1.65.7"
-releaseDate: "2026-02-26"
+softwareVersion: "1.80.0"
+releaseDate: "2026-03-07"
 logo: ".github/screenshots/landing-hero.png"
 platforms:
   - web
@@ -34,8 +34,12 @@ description:
 
       Every video gets automatic transcription via whisper.cpp with support for
       99 languages, AI-generated summaries and chapter markers, timestamped
-      comments, emoji reactions, and per-video analytics with viewer engagement
-      heatmaps.
+      comments, emoji reactions, and per-video analytics with completion funnels.
+
+
+      Team workspaces with role-based access, SSO (OIDC + SAML 2.0), SCIM 2.0
+      provisioning, Jira and GitHub integrations, data retention policies, and
+      configurable webhooks.
 
 
       Self-host with a single Go binary, Docker Compose, PostgreSQL, and any
@@ -46,14 +50,20 @@ description:
       - Automatic transcription in 99 languages via whisper.cpp
       - AI-generated summaries and chapter markers
       - Automatic silence and filler word removal
+      - Background noise suppression
       - Shareable links with password protection and expiry dates
       - Timestamped comments and emoji reactions
       - Video playlists with auto-advance and shared watch pages
-      - Per-video analytics with viewer engagement heatmaps
+      - Per-video analytics with completion funnel and CTA tracking
       - Custom branding with logo, colors, and CSS injection
       - Embeddable player for docs and wikis
       - Folders, tags, and full-text transcript search
-      - Generic webhooks and Slack notifications
+      - Team workspaces with role-based access (owner/admin/member/viewer)
+      - SSO with Google, Microsoft, GitHub social login, OIDC, and SAML 2.0
+      - SCIM 2.0 provisioning for automated user lifecycle management
+      - Jira and GitHub issue creation from videos
+      - Data retention policies with pin and grace period
+      - Generic webhooks (HMAC-SHA256) and Slack notifications
       - Self-hostable with Docker Compose
     screenshots:
       - ".github/screenshots/recording.png"
