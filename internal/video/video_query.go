@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"math"
 	"net/http"
 	"sort"
@@ -17,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/sendrec/sendrec/internal/auth"
 	"github.com/sendrec/sendrec/internal/httputil"
+	"github.com/sendrec/sendrec/internal/organization"
 	"github.com/sendrec/sendrec/internal/plans"
 	"github.com/sendrec/sendrec/internal/validate"
 )
@@ -127,7 +127,7 @@ func (h *Handler) Limits(w http.ResponseWriter, r *http.Request) {
 
 	maxVideos := h.maxVideosPerMonth
 	maxDuration := h.maxVideoDurationSeconds
-	if plan == "pro" || plan == "business" {
+	if plans.IsPaid(plan) {
 		maxVideos = 0
 		maxDuration = 0
 	}
@@ -148,7 +148,7 @@ func (h *Handler) Limits(w http.ResponseWriter, r *http.Request) {
 
 	maxPlaylists := h.maxPlaylists
 	var playlistsUsed int
-	if plan == "pro" || plan == "business" {
+	if plans.IsPaid(plan) {
 		maxPlaylists = 0
 	} else {
 		_ = h.db.QueryRow(r.Context(),
@@ -167,7 +167,7 @@ func (h *Handler) Limits(w http.ResponseWriter, r *http.Request) {
 	maxOrgsOwned := plans.Free.MaxOrgsOwned
 	maxOrgMembers := plans.Free.MaxOrgMembers
 	var orgsUsed, orgMembersUsed int
-	if userPlan == "pro" || userPlan == "business" {
+	if plans.IsPaid(userPlan) {
 		maxOrgsOwned = 0
 		maxOrgMembers = 0
 	} else {
@@ -178,7 +178,7 @@ func (h *Handler) Limits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if orgID != "" {
-		if plan == "pro" || plan == "business" {
+		if plans.IsPaid(plan) {
 			maxOrgMembers = 0
 		}
 		_ = h.db.QueryRow(r.Context(),
@@ -444,27 +444,16 @@ func (h *Handler) Watch(w http.ResponseWriter, r *http.Request) {
 	viewerUserID := h.viewerUserIDFromRequest(r)
 
 	if r.URL.Query().Get("poll") != "transcript" {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			ip := clientIP(r)
-			hash := viewerHash(ip, r.UserAgent())
-			ref := categorizeReferrer(r.Header.Get("Referer"))
-			browser := parseBrowser(r.UserAgent())
-			device := parseDevice(r.UserAgent())
-			var country, city string
-			if h.geoResolver != nil {
-				country, city = h.geoResolver.Lookup(ip)
-			}
-			if _, err := h.db.Exec(ctx,
-				`INSERT INTO video_views (video_id, viewer_hash, referrer, browser, device, country, city)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-				videoID, hash, ref, browser, device, country, city,
-			); err != nil {
-				slog.Error("video: failed to record view", "video_id", videoID, "error", err)
-			}
-			h.resolveAndNotify(ctx, videoID, ownerID, ownerEmail, creator, title, shareToken, viewerUserID, viewNotification)
-		}()
+		h.recordViewAsync(r, viewParams{
+			videoID:          videoID,
+			ownerID:          ownerID,
+			ownerEmail:       ownerEmail,
+			ownerName:        creator,
+			title:            title,
+			shareToken:       shareToken,
+			viewerUserID:     viewerUserID,
+			viewNotification: viewNotification,
+		})
 	}
 
 	videoURL, err := h.storage.GenerateDownloadURL(r.Context(), fileKey, 1*time.Hour)
@@ -582,7 +571,7 @@ func orgVideoFilter(ctx context.Context, videoID string, baseArgs []any, suffix 
 	}
 	if orgID != "" {
 		role := auth.OrgRoleFromContext(ctx)
-		if role == "owner" || role == "admin" {
+		if organization.IsAdminOrOwner(role) {
 			n := len(baseArgs)
 			return fmt.Sprintf("id = $%d AND organization_id = $%d%s", n+1, n+2, sfx),
 				append(baseArgs, videoID, orgID)

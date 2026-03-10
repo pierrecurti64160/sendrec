@@ -19,6 +19,7 @@ import (
 	"github.com/sendrec/sendrec/internal/database"
 	"github.com/sendrec/sendrec/internal/httputil"
 	"github.com/sendrec/sendrec/internal/languages"
+	"github.com/sendrec/sendrec/internal/validate"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -120,13 +121,8 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.Password) < 8 {
-		httputil.WriteError(w, http.StatusBadRequest, "password must be at least 8 characters")
-		return
-	}
-
-	if len(req.Password) > 72 {
-		httputil.WriteError(w, http.StatusBadRequest, "password must be at most 72 characters")
+	if msg := validate.Password(req.Password); msg != "" {
+		httputil.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
 
@@ -392,13 +388,8 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.Password) < 8 {
-		httputil.WriteError(w, http.StatusBadRequest, "password must be at least 8 characters")
-		return
-	}
-
-	if len(req.Password) > 72 {
-		httputil.WriteError(w, http.StatusBadRequest, "password must be at most 72 characters")
+	if msg := validate.Password(req.Password); msg != "" {
+		httputil.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
 
@@ -649,9 +640,8 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if hasRetentionChange {
-		validRetentionDays := map[int]bool{0: true, 30: true, 60: true, 90: true, 180: true, 365: true}
-		if !validRetentionDays[*req.RetentionDays] {
-			httputil.WriteError(w, http.StatusBadRequest, "invalid retention days: must be 0, 30, 60, 90, 180, or 365")
+		if msg := validate.RetentionDays(*req.RetentionDays); msg != "" {
+			httputil.WriteError(w, http.StatusBadRequest, msg)
 			return
 		}
 		if _, err := h.db.Exec(r.Context(),
@@ -669,13 +659,8 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if len(req.NewPassword) < 8 {
-			httputil.WriteError(w, http.StatusBadRequest, "password must be at least 8 characters")
-			return
-		}
-
-		if len(req.NewPassword) > 72 {
-			httputil.WriteError(w, http.StatusBadRequest, "password must be at most 72 characters")
+		if msg := validate.Password(req.NewPassword); msg != "" {
+			httputil.WriteError(w, http.StatusBadRequest, msg)
 			return
 		}
 
@@ -776,14 +761,16 @@ func ContextWithOrg(ctx context.Context, orgID, role string) context.Context {
 	return ctx
 }
 
-func (h *Handler) setRefreshTokenCookie(w http.ResponseWriter, token string) {
-	// Clear legacy cookie at old path to prevent duplicate cookies
+// SetRefreshTokenCookie sets the refresh token as an HTTP-only cookie at the
+// root path. It also clears the legacy cookie at /api/auth to prevent
+// duplicate cookies from older client sessions.
+func SetRefreshTokenCookie(w http.ResponseWriter, token string, secureCookies bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    "",
 		Path:     "/api/auth",
 		HttpOnly: true,
-		Secure:   h.secureCookies,
+		Secure:   secureCookies,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   -1,
 	})
@@ -792,34 +779,44 @@ func (h *Handler) setRefreshTokenCookie(w http.ResponseWriter, token string) {
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   h.secureCookies,
+		Secure:   secureCookies,
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(RefreshTokenDuration / time.Second),
 	})
 }
 
-func (h *Handler) issueTokens(ctx context.Context, userID string) (accessToken, refreshToken string, err error) {
-	tokenID, err := newTokenID()
+func (h *Handler) setRefreshTokenCookie(w http.ResponseWriter, token string) {
+	SetRefreshTokenCookie(w, token, h.secureCookies)
+}
+
+// IssueTokens generates an access/refresh token pair for the given user,
+// persists the refresh token in the database, and returns both tokens.
+func IssueTokens(ctx context.Context, db database.DBTX, jwtSecret, userID string) (accessToken, refreshToken string, err error) {
+	tokenID, err := NewTokenID()
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("generate token id: %w", err)
 	}
 
 	expiresAt := time.Now().Add(RefreshTokenDuration)
-	if _, err := h.db.Exec(ctx, "INSERT INTO refresh_tokens (token_id, user_id, expires_at, revoked) VALUES ($1, $2, $3, false)", tokenID, userID, expiresAt); err != nil {
-		return "", "", err
+	if _, err := db.Exec(ctx, "INSERT INTO refresh_tokens (token_id, user_id, expires_at, revoked) VALUES ($1, $2, $3, false)", tokenID, userID, expiresAt); err != nil {
+		return "", "", fmt.Errorf("store refresh token: %w", err)
 	}
 
-	accessToken, err = GenerateAccessToken(h.jwtSecret, userID)
+	accessToken, err = GenerateAccessToken(jwtSecret, userID)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("generate access token: %w", err)
 	}
 
-	refreshToken, err = GenerateRefreshToken(h.jwtSecret, userID, tokenID)
+	refreshToken, err = GenerateRefreshToken(jwtSecret, userID, tokenID)
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("generate refresh token: %w", err)
 	}
 
 	return accessToken, refreshToken, nil
+}
+
+func (h *Handler) issueTokens(ctx context.Context, userID string) (accessToken, refreshToken string, err error) {
+	return IssueTokens(ctx, h.db, h.jwtSecret, userID)
 }
 
 func (h *Handler) validateStoredRefreshToken(ctx context.Context, userID, tokenID string) error {
@@ -840,7 +837,8 @@ func (h *Handler) revokeRefreshToken(ctx context.Context, tokenID string) error 
 	return err
 }
 
-func newTokenID() (string, error) {
+// NewTokenID generates a random 16-byte hex-encoded token identifier.
+func NewTokenID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
