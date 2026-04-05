@@ -1,20 +1,19 @@
-name: Deploy Production
+name: Publish Release
 
 on:
   push:
     tags: ['v*']
 
 concurrency:
-  group: deploy-production
+  group: publish-release
 
 permissions:
   contents: write
   packages: write
 
 jobs:
-  publish-and-deploy:
+  publish:
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - uses: actions/checkout@v6
 
@@ -51,18 +50,6 @@ jobs:
             ghcr.io/sendrec/sendrec:${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Update image tag in Coolify
-        run: |
-          curl -sf -X PATCH "${{ secrets.COOLIFY_API_URL }}/applications/${{ secrets.COOLIFY_SENDREC_APP_UUID }}" \
-            -H "Authorization: Bearer ${{ secrets.COOLIFY_API_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d '{"docker_registry_image_tag": "${{ steps.version.outputs.version }}"}'
-
-      - name: Deploy via Coolify
-        run: |
-          curl -sf -X GET "${{ secrets.COOLIFY_API_URL }}/deploy?uuid=${{ secrets.COOLIFY_SENDREC_APP_UUID }}&force=false" \
-            -H "Authorization: Bearer ${{ secrets.COOLIFY_API_TOKEN }}"
 
       - name: Create GitHub Release
         env:

@@ -1,13 +1,15 @@
 # SendRec
 
-The async video platform built for Europe. Open source, GDPR native, EU hosted.
+Open-source async video messaging. Self-host it on your own infrastructure.
 
 ![SendRec — The async video platform built for Europe](.github/screenshots/landing-hero.png)
 <!-- TODO: Add animated demo GIF showing record → share → watch flow -->
 
 ## What is SendRec?
 
-SendRec is an open-source alternative to Loom for teams that need their data to stay in the EU. Record your screen, share videos with your team, and keep full control of your data.
+SendRec is an open-source alternative to Loom that you self-host on your own infrastructure. Record your screen, share videos with your team, and keep full control of your data. GDPR native, runs anywhere Docker runs.
+
+> **Note:** The hosted service at app.sendrec.eu is shutting down on August 31, 2026. SendRec continues as a fully open-source, self-hosted project.
 
 ## How SendRec Compares
 
@@ -188,29 +190,7 @@ SendRec runs on a single server with Docker Compose. See the **[Self-Hosting Gui
 
 ## API Documentation
 
-Interactive API reference is available at [`/api/docs`](https://app.sendrec.eu/api/docs) (powered by [Scalar](https://github.com/scalar/scalar)). The raw OpenAPI 3.0 spec is at [`/api/docs/openapi.yaml`](https://app.sendrec.eu/api/docs/openapi.yaml).
-
-## Deployment
-
-Deployments are automated via GitHub Actions. Three environments are available:
-
-| Environment | URL | Trigger |
-|-------------|-----|---------|
-| **Preview** | `pr-{N}.app.sendrec.eu` | PR opened/updated (write-access authors only, max 3 concurrent) |
-| **Staging** | `staging.app.sendrec.eu` | Push to `main` |
-| **Production** | `app.sendrec.eu` | Push a git tag (`v*`) |
-
-### Deploying to production
-
-1. Merge your PR to `main` — staging deploys automatically
-2. Verify on `staging.app.sendrec.eu`
-3. Tag and push:
-   ```bash
-   git tag v1.0.0
-   git push origin v1.0.0
-   ```
-
-Preview environments are cleaned up automatically when the PR is closed.
+Interactive API reference is available at `/api/docs` when running your instance (powered by [Scalar](https://github.com/scalar/scalar)). The raw OpenAPI 3.0 spec is at `/api/docs/openapi.yaml`.
 
 ## License
 
@@ -218,8 +198,7 @@ SendRec is licensed under the [GNU Affero General Public License v3.0](LICENSE).
 
 ## Links
 
-- **Website:** [sendrec.eu](https://sendrec.eu)
+- **Self-Hosting Guide:** [SELF-HOSTING.md](SELF-HOSTING.md)
 - **Changelog:** [GitHub Releases](https://github.com/sendrec/sendrec/releases)
-- **API docs:** [app.sendrec.eu/api/docs](https://app.sendrec.eu/api/docs)
-- **Blog:** [sendrec.eu/blog](https://sendrec.eu/blog)
+- **Website:** [sendrec.eu](https://sendrec.eu)
 - **Email:** hello@sendrec.eu
