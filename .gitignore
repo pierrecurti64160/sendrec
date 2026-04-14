@@ -9,6 +9,7 @@ web/coverage/
 
 # Environment
 .env
+.env.prod
 *.env.local
 
 # IDE

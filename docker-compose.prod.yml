@@ -1,0 +1,80 @@
+services:
+  sendrec:
+    build:
+      context: .
+      dockerfile: Dockerfile.standalone
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - garage-keys:/run/garage-keys:ro
+    env_file:
+      - .env.prod
+    environment:
+      - DATABASE_URL=postgres://sendrec:${SENDREC_DB_PASSWORD}@postgres:5432/sendrec?sslmode=disable
+      - S3_ENDPOINT=http://garage:3900
+      - S3_REGION=eu-central-1
+      - S3_BUCKET=recordings
+      - BASE_URL=${BASE_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - TRANSCRIPTION_ENABLED=true
+      - WHISPER_MODEL_PATH=/models/ggml-large-v3-turbo-q5_0.bin
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-1073741824}
+      - MAX_VIDEOS_PER_MONTH=0
+      - MAX_VIDEO_DURATION_SECONDS=0
+      - AWS_REQUEST_CHECKSUM_CALCULATION=when_required
+      - AWS_RESPONSE_CHECKSUM_VALIDATION=when_required
+    depends_on:
+      postgres:
+        condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
+
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    # Pas de port exposé sur l'hôte — accès uniquement via le réseau Docker
+    environment:
+      POSTGRES_USER: sendrec
+      POSTGRES_PASSWORD: ${SENDREC_DB_PASSWORD}
+      POSTGRES_DB: sendrec
+    volumes:
+      - sendrec-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sendrec"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  garage:
+    image: dxflrs/garage:v2.2.0
+    restart: unless-stopped
+    volumes:
+      - ./garage.prod.toml:/etc/garage.toml:ro
+      - sendrec-storage-meta:/var/lib/garage/meta
+      - sendrec-storage-data:/var/lib/garage/data
+    # Pas de ports exposés — accès uniquement via le réseau Docker
+
+  garage-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.garage-init
+    network_mode: "service:garage"
+    depends_on:
+      garage:
+        condition: service_started
+    volumes:
+      - ./garage.prod.toml:/etc/garage.toml:ro
+      - sendrec-storage-meta:/var/lib/garage/meta:ro
+      - garage-keys:/run/garage-keys
+      - ./garage-init.prod.sh:/garage-init.sh:ro
+    environment:
+      - S3_BUCKET=recordings
+      - GARAGE_ADMIN_TOKEN=${GARAGE_ADMIN_TOKEN}
+    entrypoint: ["/bin/sh", "/garage-init.sh"]
+
+volumes:
+  sendrec-db:
+  sendrec-storage-meta:
+  sendrec-storage-data:
+  garage-keys:

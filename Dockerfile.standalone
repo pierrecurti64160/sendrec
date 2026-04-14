@@ -37,7 +37,8 @@ COPY --from=backend /app/sendrec .
 COPY --from=whisper /build/build/bin/whisper-cli /usr/local/bin/whisper-cli
 COPY docker-entrypoint.sh .
 RUN mkdir -p /app/models && \
-    wget -q -O /app/models/std.rnnn https://github.com/richardpl/arnndn-models/raw/master/std.rnnn
+    wget -q -O /app/models/std.rnnn https://github.com/richardpl/arnndn-models/raw/master/std.rnnn && \
+    wget -q -O /app/models/ggml-large-v3-turbo-q5_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
 USER sendrec
 EXPOSE 8080
 ENTRYPOINT ["./docker-entrypoint.sh"]
