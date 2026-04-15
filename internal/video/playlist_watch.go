@@ -43,7 +43,7 @@ var playlistWatchTemplate = template.Must(template.New("playlist-watch").Funcs(t
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{.Title}} — SendRec</title>
+    <title>{{.Title}} — PierreVideo</title>
     <style nonce="{{.Nonce}}">
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :focus-visible { outline: 2px solid #00b67a; outline-offset: 2px; }
@@ -493,8 +493,7 @@ var playlistWatchTemplate = template.Must(template.New("playlist-watch").Funcs(t
             <input type="password" id="password-input" placeholder="Enter password" required maxlength="128" autofocus>
             <button type="submit" id="submit-btn">Continue</button>
         </form>
-        <div class="gate-branding">Powered by <a href="https://sendrec.eu" target="_blank" rel="noopener">SendRec</a></div>
-    </div>
+            </div>
     <script nonce="{{.Nonce}}">
         document.getElementById('password-form').addEventListener('submit', function(e) {
             e.preventDefault();
@@ -525,8 +524,7 @@ var playlistWatchTemplate = template.Must(template.New("playlist-watch").Funcs(t
             <input type="email" id="email-input" placeholder="you@example.com" required maxlength="320" autofocus>
             <button type="submit" id="submit-btn">Watch Playlist</button>
         </form>
-        <div class="gate-branding">Powered by <a href="https://sendrec.eu" target="_blank" rel="noopener">SendRec</a></div>
-    </div>
+            </div>
     <script nonce="{{.Nonce}}">
         document.getElementById('email-gate-form').addEventListener('submit', function(e) {
             e.preventDefault();
@@ -610,7 +608,6 @@ var playlistWatchTemplate = template.Must(template.New("playlist-watch").Funcs(t
                 </div>
             </div>
             <div class="branding-footer">
-                Shared via <a href="https://sendrec.eu" target="_blank" rel="noopener">SendRec</a>
             </div>
 ` + safariWarningHTML + `
         </main>

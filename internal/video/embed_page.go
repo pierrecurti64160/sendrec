@@ -198,7 +198,7 @@ var embedPageTemplate = template.Must(template.New("embed").Parse(`<!DOCTYPE htm
 {{end}}
         <div class="footer">
             <span class="footer-title">{{.Title}}</span>
-            <a href="{{.BaseURL}}/watch/{{.ShareToken}}" target="_blank" rel="noopener">Watch on SendRec</a>
+            <a href="{{.BaseURL}}/watch/{{.ShareToken}}" target="_blank" rel="noopener">Voir la vidéo</a>
         </div>
 ` + safariWarningHTML + `
     </div>

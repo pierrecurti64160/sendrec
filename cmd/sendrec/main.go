@@ -124,7 +124,7 @@ func main() {
 		Version:                 version,
 		DB:                      db.Pool,
 		Pinger:                  db,
-		Storage:                 store,
+		Storage:                 newStorageAdapter(store),
 		WebFS:                   webFS,
 		JWTSecret:               jwtSecret,
 		BaseURL:                 baseURL,
@@ -183,12 +183,13 @@ func main() {
 
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	defer cleanupCancel()
-	video.StartCleanupLoop(cleanupCtx, db.Pool, store, 10*time.Minute)
-	video.StartTranscriptionWorker(cleanupCtx, db.Pool, store, 5*time.Second, aiEnabled)
+	storeAdapter := newStorageAdapter(store)
+	video.StartCleanupLoop(cleanupCtx, db.Pool, storeAdapter, 10*time.Minute)
+	video.StartTranscriptionWorker(cleanupCtx, db.Pool, storeAdapter, 5*time.Second, aiEnabled)
 	video.StartSummaryWorker(cleanupCtx, db.Pool, aiClient, 10*time.Second)
 	video.StartDocumentWorker(cleanupCtx, db.Pool, aiClient, 10*time.Second)
 	video.StartDigestWorker(cleanupCtx, db.Pool, emailClient, baseURL)
-	video.StartTranscodeWorker(cleanupCtx, db.Pool, store, 2*time.Minute)
+	video.StartTranscodeWorker(cleanupCtx, db.Pool, storeAdapter, 2*time.Minute)
 	video.StartOnboardingWorker(cleanupCtx, db.Pool, emailClient, baseURL)
 	video.StartRetentionWorker(cleanupCtx, db.Pool, emailClient, baseURL)
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDrawingCanvas } from "../hooks/useDrawingCanvas";
 import { useCanvasCompositing } from "../hooks/useCanvasCompositing";
+import { useMediaDevices } from "../hooks/useMediaDevices";
 import { useRecording, MIN_RECORDING_SECONDS, MIN_RECORDING_BYTES } from "../hooks/useRecording";
 import { getSupportedMimeType, blobTypeFromMimeType } from "../utils/mediaFormat";
 import { formatDuration } from "../utils/format";
@@ -18,6 +19,11 @@ export function Recorder({ onRecordingComplete, onRecordingError, maxDurationSec
   const [previewExpanded, setPreviewExpanded] = useState(false);
   const [systemAudioEnabled, setSystemAudioEnabled] = useState(() => localStorage.getItem("recording-audio") !== "false");
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [notesText, setNotesText] = useState("");
+  const [notesVisible, setNotesVisible] = useState(false);
+  const notesWindowRef = useRef<Window | null>(null);
+  const webcamPipVideoRef = useRef<HTMLVideoElement | null>(null);
+  const devices = useMediaDevices();
   const countdownEnabled = useRef(localStorage.getItem("recording-countdown") !== "false");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -64,6 +70,13 @@ export function Recorder({ onRecordingComplete, onRecordingError, maxDurationSec
     });
 
   const stopWebcamStream = useCallback(() => {
+    if (document.pictureInPictureElement) {
+      document.exitPictureInPicture().catch(() => {});
+    }
+    if (webcamPipVideoRef.current) {
+      webcamPipVideoRef.current.remove();
+      webcamPipVideoRef.current = null;
+    }
     if (webcamStreamRef.current) {
       webcamStreamRef.current.getTracks().forEach((track) => track.stop());
       webcamStreamRef.current = null;
@@ -189,16 +202,63 @@ export function Recorder({ onRecordingComplete, onRecordingError, maxDurationSec
   async function toggleWebcam() {
     setMediaError(null);
     if (webcamEnabled) {
+      // Fermer le PiP si actif
+      if (document.pictureInPictureElement) {
+        document.exitPictureInPicture().catch(() => {});
+      }
       stopWebcamStream();
       setWebcamEnabled(false);
       return;
     }
     try {
+      const videoConstraints: MediaTrackConstraints = { width: 320, height: 240 };
+      if (devices.selectedCamera) {
+        videoConstraints.deviceId = { exact: devices.selectedCamera };
+      } else {
+        videoConstraints.facingMode = "user";
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 320, height: 240, facingMode: "user" },
+        video: videoConstraints,
         audio: false,
       });
       webcamStreamRef.current = stream;
+
+      // Créer un élément vidéo et lancer le Picture-in-Picture OS-level
+      const pipVideo = document.createElement("video");
+      pipVideo.srcObject = stream;
+      pipVideo.muted = true;
+      pipVideo.playsInline = true;
+      pipVideo.autoplay = true;
+      // Le video doit avoir une taille minimale pour que PiP fonctionne
+      pipVideo.style.position = "fixed";
+      pipVideo.style.bottom = "0";
+      pipVideo.style.right = "0";
+      pipVideo.style.width = "320px";
+      pipVideo.style.height = "240px";
+      pipVideo.style.opacity = "0.01";
+      pipVideo.style.pointerEvents = "none";
+      pipVideo.style.zIndex = "-1";
+      document.body.appendChild(pipVideo);
+      webcamPipVideoRef.current = pipVideo;
+
+      await pipVideo.play();
+
+      try {
+        await pipVideo.requestPictureInPicture();
+      } catch (pipErr) {
+        console.warn("PiP not available, webcam stays in-page", pipErr);
+        // PiP pas supporté — rendre le video visible en fallback
+        pipVideo.style.opacity = "1";
+        pipVideo.style.zIndex = "9999";
+        pipVideo.style.borderRadius = "50%";
+        pipVideo.style.objectFit = "cover";
+        pipVideo.style.width = "160px";
+        pipVideo.style.height = "160px";
+        pipVideo.style.border = "3px solid rgba(255,255,255,0.3)";
+        pipVideo.style.boxShadow = "0 4px 20px rgba(0,0,0,0.4)";
+        pipVideo.style.pointerEvents = "auto";
+      }
+
       setWebcamEnabled(true);
     } catch (err) {
       console.error("Webcam access failed", err);
@@ -227,7 +287,11 @@ export function Recorder({ onRecordingComplete, onRecordingError, maxDurationSec
       let recordingStream: MediaStream = screenStream;
       if (systemAudioEnabled) {
         try {
-          const micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+          const micConstraints: MediaTrackConstraints = {};
+          if (devices.selectedMicrophone) {
+            micConstraints.deviceId = { exact: devices.selectedMicrophone };
+          }
+          const micStream = await navigator.mediaDevices.getUserMedia({ audio: micConstraints.deviceId ? micConstraints : true, video: false });
           micStreamRef.current = micStream;
 
           const audioContext = new AudioContext();
@@ -292,32 +356,11 @@ export function Recorder({ onRecordingComplete, onRecordingError, maxDurationSec
       recording.pauseStartRef.current = 0;
       recording.totalPausedRef.current = 0;
 
-      // Set up webcam recorder if webcam is enabled (but don't start yet).
-      // Always use WebM for webcam — it's only used temporarily for server-side compositing,
-      // and WebM is more reliable for video-only MediaRecorder streams across browsers.
+      // Webcam is captured as part of the screen recording (round circle on screen).
+      // No separate webcam recording needed — avoids double overlay from server compositing.
       webcamBlobPromiseRef.current = null;
-      if (webcamEnabled && webcamStreamRef.current) {
-        const webcamMimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-          ? "video/webm;codecs=vp9"
-          : "video/webm";
-        const webcamRecorder = new MediaRecorder(webcamStreamRef.current, {
-          mimeType: webcamMimeType,
-        });
-        webcamRecorderRef.current = webcamRecorder;
-        webcamChunksRef.current = [];
-
-        webcamRecorder.ondataavailable = (event) => {
-          if (event.data.size > 0) {
-            webcamChunksRef.current.push(event.data);
-          }
-        };
-
-        webcamBlobPromiseRef.current = new Promise<Blob>((resolve) => {
-          webcamRecorder.onstop = () => {
-            resolve(new Blob(webcamChunksRef.current, { type: "video/webm" }));
-          };
-        });
-      }
+      webcamRecorderRef.current = null;
+      webcamChunksRef.current = [];
 
       const handleDataAvailable = (event: BlobEvent) => {
         if (event.data.size > 0) {
@@ -550,28 +593,125 @@ export function Recorder({ onRecordingComplete, onRecordingError, maxDurationSec
               Maximum recording length: {formatDuration(maxDurationSeconds)}
             </p>
           )}
-          <div className="record-controls">
-            <button
-              onClick={toggleWebcam}
-              aria-label={webcamEnabled ? "Disable camera" : "Enable camera"}
-              className={`btn-secondary${webcamEnabled ? " btn-secondary--active" : ""}`}
-            >
-              {webcamEnabled ? "Camera On" : "Camera Off"}
-            </button>
-            <button
-              onClick={() => setSystemAudioEnabled((prev) => !prev)}
-              aria-label={systemAudioEnabled ? "Disable system audio" : "Enable system audio"}
-              className={`btn-secondary${systemAudioEnabled ? " btn-secondary--active" : ""}`}
-            >
-              {systemAudioEnabled ? "Audio On" : "Audio Off"}
-            </button>
-            <button
-              onClick={startRecording}
-              aria-label="Start recording"
-              className="btn-record"
-            >
-              Start Recording
-            </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", maxWidth: 480 }}>
+            {/* Device selectors */}
+            {devices.cameras.length > 1 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label style={{ fontSize: 13, color: "var(--color-text-secondary)", minWidth: 70 }}>Caméra</label>
+                <select
+                  value={devices.selectedCamera}
+                  onChange={(e) => devices.setSelectedCamera(e.target.value)}
+                  style={{
+                    flex: 1, padding: "6px 8px", borderRadius: 6,
+                    border: "1px solid var(--color-border)", background: "var(--color-surface)",
+                    color: "var(--color-text)", fontSize: 13,
+                  }}
+                >
+                  <option value="">Par défaut</option>
+                  {devices.cameras.map((cam) => (
+                    <option key={cam.deviceId} value={cam.deviceId}>{cam.label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {devices.microphones.length > 1 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label style={{ fontSize: 13, color: "var(--color-text-secondary)", minWidth: 70 }}>Micro</label>
+                <select
+                  value={devices.selectedMicrophone}
+                  onChange={(e) => devices.setSelectedMicrophone(e.target.value)}
+                  style={{
+                    flex: 1, padding: "6px 8px", borderRadius: 6,
+                    border: "1px solid var(--color-border)", background: "var(--color-surface)",
+                    color: "var(--color-text)", fontSize: 13,
+                  }}
+                >
+                  <option value="">Par défaut</option>
+                  {devices.microphones.map((mic) => (
+                    <option key={mic.deviceId} value={mic.deviceId}>{mic.label}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <div className="record-controls">
+              <button
+                onClick={toggleWebcam}
+                aria-label={webcamEnabled ? "Disable camera" : "Enable camera"}
+                className={`btn-secondary${webcamEnabled ? " btn-secondary--active" : ""}`}
+              >
+                {webcamEnabled ? "Camera On" : "Camera Off"}
+              </button>
+              <button
+                onClick={() => setSystemAudioEnabled((prev) => !prev)}
+                aria-label={systemAudioEnabled ? "Disable system audio" : "Enable system audio"}
+                className={`btn-secondary${systemAudioEnabled ? " btn-secondary--active" : ""}`}
+              >
+                {systemAudioEnabled ? "Audio On" : "Audio Off"}
+              </button>
+              <button
+                onClick={async () => {
+                  if (notesVisible && notesWindowRef.current) {
+                    notesWindowRef.current.close();
+                    notesWindowRef.current = null;
+                    setNotesVisible(false);
+                    return;
+                  }
+
+                  // Essayer Document PiP (fenêtre flottante OS-level)
+                  // Fallback sur window.open si pas supporté
+                  let win: Window | null = null;
+
+                  if ("documentPictureInPicture" in window) {
+                    try {
+                      const pipWin = await (window as unknown as { documentPictureInPicture: { requestWindow: (opts: { width: number; height: number }) => Promise<Window> } }).documentPictureInPicture.requestWindow({ width: 350, height: 400 });
+                      win = pipWin;
+                    } catch {
+                      // PiP refusé — fallback
+                    }
+                  }
+
+                  if (!win) {
+                    win = window.open("", "sendrec-notes", "width=350,height=400,left=50,top=100,resizable=yes");
+                  }
+
+                  if (win) {
+                    const style = win.document.createElement("style");
+                    style.textContent = `
+                      * { margin: 0; padding: 0; box-sizing: border-box; }
+                      body { background: #1a1a2e; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; flex-direction: column; height: 100vh; }
+                      .header { padding: 10px 14px; font-size: 12px; font-weight: 600; color: rgba(255,255,255,0.5); border-bottom: 1px solid rgba(255,255,255,0.1); user-select: none; }
+                      textarea { flex: 1; background: transparent; border: none; outline: none; color: #e2e8f0; font-size: 14px; line-height: 1.6; padding: 12px 14px; resize: none; width: 100%; }
+                      textarea::placeholder { color: rgba(255,255,255,0.3); }
+                    `;
+                    win.document.head.appendChild(style);
+                    win.document.body.innerHTML = `<div class="header">Notes (pas enregistrées)</div><textarea id="notes" placeholder="Écris tes notes ici..."></textarea>`;
+                    const textarea = win.document.getElementById("notes") as HTMLTextAreaElement;
+                    if (textarea) {
+                      textarea.value = notesText;
+                      textarea.addEventListener("input", () => setNotesText(textarea.value));
+                    }
+                    win.addEventListener("pagehide", () => {
+                      notesWindowRef.current = null;
+                      setNotesVisible(false);
+                    });
+                    notesWindowRef.current = win;
+                    setNotesVisible(true);
+                  }
+                }}
+                aria-label={notesVisible ? "Hide notes" : "Show notes"}
+                className={`btn-secondary${notesVisible ? " btn-secondary--active" : ""}`}
+              >
+                {notesVisible ? "Notes On" : "Notes Off"}
+              </button>
+              <button
+                onClick={startRecording}
+                aria-label="Start recording"
+                className="btn-record"
+              >
+                Start Recording
+              </button>
+            </div>
           </div>
         </>
       )}
@@ -676,16 +816,9 @@ export function Recorder({ onRecordingComplete, onRecordingError, maxDurationSec
         </div>
       )}
 
-      {webcamEnabled && (
-        <video
-          ref={webcamVideoCallbackRef}
-          autoPlay
-          muted
-          playsInline
-          className="pip-preview"
-          style={{ width: 160, height: 120 }}
-        />
-      )}
+      {/* Webcam en Picture-in-Picture natif — flotte au-dessus de toutes les apps macOS */}
+
+      {/* Notes dans une fenêtre popup séparée — jamais capturées par l'enregistrement écran */}
     </div>
   );
 }

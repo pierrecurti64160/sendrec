@@ -102,7 +102,9 @@ func processNextSummary(ctx context.Context, db database.DBTX, ai *AIClient) {
 				titleTranscript = titleTranscript[:2000]
 			}
 			if suggestedTitle, err := ai.GenerateTitle(ctx, titleTranscript); err == nil && suggestedTitle != "" {
-				_, _ = db.Exec(ctx, `UPDATE videos SET suggested_title = $1, updated_at = now() WHERE id = $2`, suggestedTitle, videoID)
+				// Appliquer directement le titre généré (pas de validation manuelle)
+				_, _ = db.Exec(ctx, `UPDATE videos SET title = $1, suggested_title = NULL, updated_at = now() WHERE id = $2`, suggestedTitle, videoID)
+				slog.Info("summary-worker: applied AI title", "video_id", videoID, "title", suggestedTitle)
 			}
 		}
 	}
@@ -159,12 +161,12 @@ func processNextTitleSuggestion(ctx context.Context, db database.DBTX, ai *AICli
 	}
 
 	if _, err := db.Exec(ctx,
-		`UPDATE videos SET suggested_title = $1, updated_at = now() WHERE id = $2`,
+		`UPDATE videos SET title = $1, suggested_title = NULL, updated_at = now() WHERE id = $2`,
 		suggestedTitle, videoID,
 	); err != nil {
 		slog.Error("title-suggestion: failed to save", "video_id", videoID, "error", err)
 	} else {
-		slog.Info("title-suggestion: suggested title", "video_id", videoID, "suggested_title", suggestedTitle)
+		slog.Info("title-suggestion: applied AI title", "video_id", videoID, "title", suggestedTitle)
 	}
 }
 

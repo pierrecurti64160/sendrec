@@ -18,6 +18,16 @@ type ObjectStorage interface {
 	HeadObject(ctx context.Context, key string) (int64, string, error)
 	DownloadToFile(ctx context.Context, key string, destPath string) error
 	UploadFile(ctx context.Context, key string, filePath string, contentType string) error
+	InitMultipartUpload(ctx context.Context, key string, contentType string) (string, error)
+	GeneratePartUploadURL(ctx context.Context, key, uploadID string, partNumber int32, expiry time.Duration) (string, error)
+	CompleteMultipartUpload(ctx context.Context, key, uploadID string, parts []MultipartPart) error
+	AbortMultipartUpload(ctx context.Context, key, uploadID string) error
+}
+
+// MultipartPart représente un part uploadé dans un multipart S3.
+type MultipartPart struct {
+	PartNumber int32  `json:"partNumber"`
+	ETag       string `json:"eTag"`
 }
 
 type CommentNotifier interface {

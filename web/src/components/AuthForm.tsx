@@ -78,10 +78,9 @@ export function AuthForm({
         )}
       </button>
       <div className="auth-brand">
-        <img src="/images/logo.png" alt="" width="48" height="48" className="auth-logo-img" />
         <span className="auth-logo">
-          <span className="auth-logo-send">Send</span>
-          <span className="auth-logo-rec">Rec</span>
+          <span className="auth-logo-send">Pierre</span>
+          <span className="auth-logo-rec">Video</span>
         </span>
       </div>
 

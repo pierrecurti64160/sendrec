@@ -1,25 +1,25 @@
 :root {
-  --color-bg: #0a1628;
-  --color-surface: #111d32;
-  --color-surface-raised: #162540;
-  --color-border: #1e2d45;
-  --color-border-hover: #2a3d5a;
-  --color-text: #ffffff;
-  --color-text-secondary: #8892a4;
-  --color-text-tertiary: #5a6478;
-  --color-accent: #00b67a;
-  --color-accent-hover: #00a06b;
-  --color-accent-subtle: rgba(0, 182, 122, 0.12);
+  --color-bg: #050508;
+  --color-surface: #0a0a0f;
+  --color-surface-raised: #111116;
+  --color-border: rgba(255,255,255,0.07);
+  --color-border-hover: rgba(255,255,255,0.16);
+  --color-text: #ebebeb;
+  --color-text-secondary: #9a9a9a;
+  --color-text-tertiary: #5f5f5f;
+  --color-accent: #34d399;
+  --color-accent-hover: #6ee7b7;
+  --color-accent-subtle: rgba(52, 211, 153, 0.07);
   --color-error: #ef4444;
   --color-error-subtle: rgba(239, 68, 68, 0.12);
   --color-warning: #f59e0b;
   --color-overlay: rgba(0, 0, 0, 0.6);
   --color-shadow: rgba(0, 0, 0, 0.3);
   --color-on-accent: #ffffff;
-  --color-chart-label: #94a3b8;
-  --color-chart-grid: rgba(148, 163, 184, 0.1);
-  --color-drag-highlight: rgba(0, 182, 122, 0.05);
-  --color-bg-tertiary: #1a2740;
+  --color-chart-label: #9a9a9a;
+  --color-chart-grid: rgba(154, 154, 154, 0.1);
+  --color-drag-highlight: rgba(52, 211, 153, 0.05);
+  --color-bg-tertiary: #111116;
 
   /* Spacing scale (4px base) */
   --space-1: 4px;
@@ -77,12 +77,31 @@
   box-sizing: border-box;
 }
 
+@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+
 body {
   background: var(--color-bg);
   color: var(--color-text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 400;
+  letter-spacing: -0.01em;
   line-height: 1.5;
   overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Grain overlay — même texture que pierrecurti.com */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.022;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
 }
 
 a {

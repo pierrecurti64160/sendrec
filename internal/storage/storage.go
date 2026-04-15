@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 type Storage struct {
@@ -81,15 +82,99 @@ func (s *Storage) GenerateUploadURL(ctx context.Context, key string, contentType
 	if s.uploadLimit() > 0 && contentLength > s.uploadLimit() {
 		return "", fmt.Errorf("file too large: %d > %d", contentLength, s.uploadLimit())
 	}
-	if contentLength > 0 {
-		input.ContentLength = aws.Int64(contentLength)
-	}
+	// Ne pas inclure ContentLength dans la presigned URL — la taille exacte
+	// du blob d'enregistrement n'est connue qu'après l'arrêt de la capture
+	// et peut différer de l'estimation envoyée par le frontend.
 	req, err := s.presigner.PresignPutObject(ctx, input, s3.WithPresignExpires(expiry))
 	if err != nil {
 		return "", fmt.Errorf("presign upload: %w", err)
 	}
 
 	return req.URL, nil
+}
+
+// InitMultipartUpload démarre un upload S3 multipart et retourne l'UploadId.
+func (s *Storage) InitMultipartUpload(ctx context.Context, key string, contentType string) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("storage not initialized")
+	}
+	out, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		ContentType: aws.String(contentType),
+	})
+	if err != nil {
+		return "", fmt.Errorf("init multipart: %w", err)
+	}
+	if out.UploadId == nil {
+		return "", fmt.Errorf("init multipart: no upload id")
+	}
+	return *out.UploadId, nil
+}
+
+// GeneratePartUploadURL retourne une URL presignée pour uploader un part spécifique.
+func (s *Storage) GeneratePartUploadURL(ctx context.Context, key, uploadID string, partNumber int32, expiry time.Duration) (string, error) {
+	if s == nil {
+		return "", fmt.Errorf("storage not initialized")
+	}
+	req, err := s.presigner.PresignUploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(s.bucket),
+		Key:        aws.String(key),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(partNumber),
+	}, s3.WithPresignExpires(expiry))
+	if err != nil {
+		return "", fmt.Errorf("presign part: %w", err)
+	}
+	return req.URL, nil
+}
+
+// Part représente un part uploadé (numéro + ETag retourné par S3).
+type Part struct {
+	PartNumber int32
+	ETag       string
+}
+
+// CompleteMultipartUpload finalise l'upload en assemblant tous les parts.
+func (s *Storage) CompleteMultipartUpload(ctx context.Context, key, uploadID string, parts []Part) error {
+	if s == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+	s3Parts := make([]types.CompletedPart, len(parts))
+	for i, p := range parts {
+		s3Parts[i] = types.CompletedPart{
+			PartNumber: aws.Int32(p.PartNumber),
+			ETag:       aws.String(p.ETag),
+		}
+	}
+	_, err := s.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(s.bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: s3Parts,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("complete multipart: %w", err)
+	}
+	return nil
+}
+
+// AbortMultipartUpload annule un upload multipart (cleanup en cas d'erreur).
+func (s *Storage) AbortMultipartUpload(ctx context.Context, key, uploadID string) error {
+	if s == nil {
+		return fmt.Errorf("storage not initialized")
+	}
+	_, err := s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(s.bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil {
+		return fmt.Errorf("abort multipart: %w", err)
+	}
+	return nil
 }
 
 func (s *Storage) GenerateDownloadURL(ctx context.Context, key string, expiry time.Duration) (string, error) {

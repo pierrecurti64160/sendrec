@@ -122,10 +122,13 @@ var watchPageTemplate = template.Must(template.New("watch").Funcs(watchFuncs).Pa
             --radius-xl: 12px;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
         body {
             background: var(--brand-bg);
             color: var(--brand-text);
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            letter-spacing: -0.01em;
+            -webkit-font-smoothing: antialiased;
             min-height: 100vh;
             display: flex;
             flex-direction: column;
@@ -146,7 +149,6 @@ var watchPageTemplate = template.Must(template.New("watch").Funcs(watchFuncs).Pa
             background: #000;
             border-radius: 8px;
             overflow: hidden;
-            aspect-ratio: 16/9;
             --player-accent: var(--brand-accent, #00b67a);
         }
 ` + playerCSS + `
@@ -1653,7 +1655,7 @@ var watchPageTemplate = template.Must(template.New("watch").Funcs(watchFuncs).Pa
         {{end}}
         </script>
         {{end}}
-        {{if or (eq .SubscriptionPlan "pro") (eq .SubscriptionPlan "business")}}{{if .Branding.FooterText}}<p class="branding">{{.Branding.FooterText}}</p>{{end}}{{else}}<p class="branding">{{if .Branding.FooterText}}{{.Branding.FooterText}} · {{end}}<a href="https://sendrec.eu">Recorded with SendRec</a> — free and open source</p>{{end}}
+        {{if .Branding.FooterText}}<p class="branding">{{.Branding.FooterText}}</p>{{end}}
     </div>
 {{.AnalyticsScript}}
 </body>
@@ -1664,7 +1666,7 @@ var expiredPageTemplate = template.Must(template.New("expired").Parse(`<!DOCTYPE
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Link Expired — SendRec</title>
+    <title>Lien expiré — PierreVideo</title>
     <style nonce="{{.Nonce}}">
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -1693,9 +1695,8 @@ var expiredPageTemplate = template.Must(template.New("expired").Parse(`<!DOCTYPE
 </head>
 <body>
     <div class="container">
-        <h1>This link has expired</h1>
-        <p>The video owner can extend the link to make it available again.</p>
-        <a href="https://sendrec.eu">Go to SendRec</a>
+        <h1>Ce lien a expiré</h1>
+        <p>Le propriétaire de la vidéo peut le réactiver.</p>
     </div>
 </body>
 </html>`))
@@ -1705,7 +1706,7 @@ var notFoundPageTemplate = template.Must(template.New("notfound").Parse(`<!DOCTY
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Video Not Found — SendRec</title>
+    <title>Vidéo introuvable — PierreVideo</title>
     <style nonce="{{.Nonce}}">
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -1734,9 +1735,8 @@ var notFoundPageTemplate = template.Must(template.New("notfound").Parse(`<!DOCTY
 </head>
 <body>
     <div class="container">
-        <h1>Video not found</h1>
-        <p>This video doesn't exist or has been deleted.</p>
-        <a href="https://sendrec.eu">Go to SendRec</a>
+        <h1>Vidéo introuvable</h1>
+        <p>Cette vidéo n'existe pas ou a été supprimée.</p>
     </div>
 </body>
 </html>`))
@@ -1903,7 +1903,7 @@ var emailGatePageTemplate = template.Must(template.New("emailgate").Parse(`<!DOC
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{.Title}} — SendRec</title>
+    <title>{{.Title}} — PierreVideo</title>
     <style nonce="{{.Nonce}}">
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {

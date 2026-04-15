@@ -19,7 +19,7 @@ RUN git clone --depth 1 --branch v1.8.3 https://github.com/ggerganov/whisper.cpp
     cmake --build build --target whisper-cli -j$(nproc)
 
 # Stage 3: Build Go binary
-FROM golang:1.26.1-alpine AS backend
+FROM golang:1.26.2-alpine AS backend
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -28,17 +28,37 @@ COPY --from=frontend /app/web/dist ./web/dist
 ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -ldflags="-s -w -X main.version=${VERSION}" -o sendrec ./cmd/sendrec
 
-# Stage 4: Final image
-FROM alpine:3.21
-RUN apk add --no-cache ca-certificates ffmpeg libstdc++
-RUN addgroup -S sendrec && adduser -S sendrec -G sendrec
+# Stage 4: Final image (Debian slim pour faster-whisper)
+FROM debian:12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates ffmpeg wget python3 python3-pip python3-venv libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Installer faster-whisper
+RUN python3 -m venv /opt/whisper-venv && \
+    /opt/whisper-venv/bin/pip install --no-cache-dir faster-whisper==1.1.0 huggingface_hub
+
+# Scripts wrapper
+COPY docker/faster-whisper-cli /usr/local/bin/faster-whisper-cli
+COPY docker/faster_whisper_wrapper.py /opt/whisper-venv/faster_whisper_wrapper.py
+RUN chmod +x /usr/local/bin/faster-whisper-cli
+
+# Télécharger le modèle CT2 avec le token HF
+ARG HF_TOKEN
+RUN /opt/whisper-venv/bin/python3 -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('mobiuslabsgmbh/faster-whisper-large-v3-turbo', local_dir='/app/models/faster-whisper-large-v3-turbo', token='${HF_TOKEN}')"
+
+RUN groupadd -r sendrec && useradd -r -g sendrec sendrec
 WORKDIR /app
 COPY --from=backend /app/sendrec .
 COPY --from=whisper /build/build/bin/whisper-cli /usr/local/bin/whisper-cli
 COPY docker-entrypoint.sh .
 RUN mkdir -p /app/models && \
     wget -q -O /app/models/std.rnnn https://github.com/richardpl/arnndn-models/raw/master/std.rnnn && \
-    wget -q -O /app/models/ggml-large-v3-turbo-q5_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin
+    wget -q -O /app/models/ggml-large-v3-turbo-q5_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin && \
+    chown -R sendrec:sendrec /app/models
+
 USER sendrec
 EXPOSE 8080
 ENTRYPOINT ["./docker-entrypoint.sh"]

@@ -13,12 +13,13 @@ services:
     environment:
       - DATABASE_URL=postgres://sendrec:${SENDREC_DB_PASSWORD}@postgres:5432/sendrec?sslmode=disable
       - S3_ENDPOINT=http://garage:3900
+      - S3_PUBLIC_ENDPOINT=https://storage.pierrecurti.com
       - S3_REGION=eu-central-1
       - S3_BUCKET=recordings
       - BASE_URL=${BASE_URL}
       - JWT_SECRET=${JWT_SECRET}
       - TRANSCRIPTION_ENABLED=true
-      - WHISPER_MODEL_PATH=/models/ggml-large-v3-turbo-q5_0.bin
+      - WHISPER_MODEL_PATH=/app/models/ggml-large-v3-turbo-q5_0.bin
       - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-1073741824}
       - MAX_VIDEOS_PER_MONTH=0
       - MAX_VIDEO_DURATION_SECONDS=0
@@ -53,7 +54,8 @@ services:
       - ./garage.prod.toml:/etc/garage.toml:ro
       - sendrec-storage-meta:/var/lib/garage/meta
       - sendrec-storage-data:/var/lib/garage/data
-    # Pas de ports exposés — accès uniquement via le réseau Docker
+    ports:
+      - "127.0.0.1:3900:3900"
 
   garage-init:
     build:

@@ -35,6 +35,10 @@ func isTranscriptionAvailable() bool {
 	if os.Getenv("TRANSCRIPTION_ENABLED") != "true" {
 		return false
 	}
+	// faster-whisper ou whisper-cli (fallback)
+	if _, err := exec.LookPath("faster-whisper-cli"); err == nil {
+		return true
+	}
 	if _, err := exec.LookPath("whisper-cli"); err != nil {
 		return false
 	}
@@ -81,18 +85,29 @@ func extractAudio(inputPath, outputPath string) error {
 }
 
 func runWhisper(audioPath, outputPrefix, language string) error {
-	cmd := exec.Command("whisper-cli",
+	// Choisir le CLI : faster-whisper (2-4x plus rapide) ou whisper-cli en fallback
+	var cliName string
+	if _, err := exec.LookPath("faster-whisper-cli"); err == nil {
+		cliName = "faster-whisper-cli"
+	} else {
+		cliName = "whisper-cli"
+	}
+
+	// Priorité basse (nice -n 19) pour ne pas freiner les autres services du VPS.
+	// Whisper prendra du CPU seulement quand rien d'autre n'en a besoin.
+	cmd := exec.Command("nice", "-n", "19",
+		cliName,
 		"-m", whisperModelPath(),
 		"-f", audioPath,
 		"--output-vtt",
 		"--output-json",
 		"-of", outputPrefix,
-		"-t", "2",
+		"-t", "3", // 3 threads sur 4 vCPU : laisse 1 core libre en permanence
 		"-l", language,
 	)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("whisper: %w: %s", err, string(output))
+		return fmt.Errorf("whisper (%s): %w: %s", cliName, err, string(output))
 	}
 	return nil
 }

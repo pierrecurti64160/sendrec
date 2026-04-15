@@ -35,11 +35,13 @@ func (h *Handler) DetectSilence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	noiseDB := -30
+	// Seuil conservateur : -40dB (moins sensible) et 2s minimum
+	// (les pauses naturelles entre phrases ne sont pas détectées comme silences)
+	noiseDB := -40
 	if req.NoiseDB != nil {
 		noiseDB = *req.NoiseDB
 	}
-	minDuration := 1.0
+	minDuration := 2.0
 	if req.MinDuration != nil {
 		minDuration = *req.MinDuration
 	}
@@ -83,17 +85,24 @@ func (h *Handler) DetectSilence(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clamp segments to video duration so remove-segments won't reject them
+	// Marge de respiration généreuse (0.5s avant + 0.5s après) pour un trim naturel.
+	// Les silences trop courts après application de la marge sont ignorés.
+	const breathingMargin = 0.5
+
 	maxEnd := float64(duration)
 	clamped := make([]segmentRange, 0, len(segments))
 	for _, seg := range segments {
+		seg.Start += breathingMargin
+		seg.End -= breathingMargin
+
 		if seg.Start >= maxEnd {
 			continue
 		}
 		if seg.End > maxEnd {
 			seg.End = maxEnd
 		}
-		if seg.End-seg.Start >= 0.1 {
+		// Ne garder que les silences >= 1s après la marge (sinon c'est pas la peine)
+		if seg.End-seg.Start >= 1.0 {
 			clamped = append(clamped, seg)
 		}
 	}

@@ -1,0 +1,3 @@
+#!/bin/bash
+# Wrapper shell qui appelle le script Python faster-whisper
+exec /opt/whisper-venv/bin/python3 /opt/whisper-venv/faster_whisper_wrapper.py "$@"

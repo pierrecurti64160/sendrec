@@ -128,13 +128,7 @@ export function Layout({ children }: LayoutProps) {
     <>
       <nav className="nav-bar">
         <Link to="/" className="nav-logo" onClick={handleNavClick}>
-          <img src="/images/logo.png" alt="" width="48" height="48" />
-          <span className="logo-send">Send</span><span className="logo-rec">Rec</span>
-          {plan && (
-            <span className={`plan-badge${plan !== "free" ? " plan-badge--pro" : ""}`}>
-              {plan === "business" ? "Business" : plan === "pro" ? "Pro" : "Free"}
-            </span>
-          )}
+          <span className="logo-send">Pierre</span><span className="logo-rec">Video</span>
         </Link>
 
         <div className="org-switcher" ref={orgDropdownRef} onKeyDown={handleDropdownKeyDown}>
