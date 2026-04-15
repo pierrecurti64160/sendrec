@@ -103,8 +103,13 @@ func processNextSummary(ctx context.Context, db database.DBTX, ai *AIClient) {
 			}
 			if suggestedTitle, err := ai.GenerateTitle(ctx, titleTranscript); err == nil && suggestedTitle != "" {
 				// Appliquer directement le titre généré (pas de validation manuelle)
-				_, _ = db.Exec(ctx, `UPDATE videos SET title = $1, suggested_title = NULL, updated_at = now() WHERE id = $2`, suggestedTitle, videoID)
-				slog.Info("summary-worker: applied AI title", "video_id", videoID, "title", suggestedTitle)
+				if _, err := db.Exec(ctx, `UPDATE videos SET title = $1, suggested_title = NULL, updated_at = now() WHERE id = $2`, suggestedTitle, videoID); err != nil {
+					slog.Error("summary-worker: failed to apply AI title", "video_id", videoID, "error", err)
+				} else {
+					slog.Info("summary-worker: applied AI title", "video_id", videoID, "title", suggestedTitle)
+				}
+			} else if err != nil {
+				slog.Warn("summary-worker: AI title generation failed", "video_id", videoID, "error", err)
 			}
 		}
 	}

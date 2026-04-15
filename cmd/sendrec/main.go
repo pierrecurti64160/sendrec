@@ -190,6 +190,7 @@ func main() {
 	video.StartDocumentWorker(cleanupCtx, db.Pool, aiClient, 10*time.Second)
 	video.StartDigestWorker(cleanupCtx, db.Pool, emailClient, baseURL)
 	video.StartTranscodeWorker(cleanupCtx, db.Pool, storeAdapter, 2*time.Minute)
+	video.StartMultipartCleanupWorker(cleanupCtx, db.Pool, storeAdapter, 1*time.Hour)
 	video.StartOnboardingWorker(cleanupCtx, db.Pool, emailClient, baseURL)
 	video.StartRetentionWorker(cleanupCtx, db.Pool, emailClient, baseURL)
 

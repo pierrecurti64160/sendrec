@@ -43,11 +43,15 @@ COPY docker/faster-whisper-cli /usr/local/bin/faster-whisper-cli
 COPY docker/faster_whisper_wrapper.py /opt/whisper-venv/faster_whisper_wrapper.py
 RUN chmod +x /usr/local/bin/faster-whisper-cli
 
-# Télécharger le modèle CT2 avec le token HF
-ARG HF_TOKEN
-RUN /opt/whisper-venv/bin/python3 -c "\
+# Télécharger le modèle CT2 via BuildKit secret (le token n'est PAS baké dans l'image).
+# Build avec : DOCKER_BUILDKIT=1 docker build --secret id=hf_token,src=hf_token.txt ...
+# Ou avec compose : ajouter secrets dans docker-compose.prod.yml
+RUN --mount=type=secret,id=hf_token,required=true \
+    HF_TOKEN=$(cat /run/secrets/hf_token) \
+    /opt/whisper-venv/bin/python3 -c "\
+import os; \
 from huggingface_hub import snapshot_download; \
-snapshot_download('mobiuslabsgmbh/faster-whisper-large-v3-turbo', local_dir='/app/models/faster-whisper-large-v3-turbo', token='${HF_TOKEN}')"
+snapshot_download('mobiuslabsgmbh/faster-whisper-large-v3-turbo', local_dir='/app/models/faster-whisper-large-v3-turbo', token=os.environ['HF_TOKEN'])"
 
 RUN groupadd -r sendrec && useradd -r -g sendrec sendrec
 WORKDIR /app
