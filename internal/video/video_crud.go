@@ -34,8 +34,10 @@ type createResponse struct {
 }
 
 type updateRequest struct {
-	Status string `json:"status"`
-	Title  string `json:"title"`
+	Status   string `json:"status"`
+	Title    string `json:"title"`
+	FileSize int64  `json:"fileSize,omitempty"`
+	Duration int    `json:"duration,omitempty"`
 }
 
 type uploadRequest struct {
@@ -327,6 +329,27 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			httputil.WriteError(w, http.StatusNotFound, "video not found")
 			return
+		}
+
+		// Streaming upload : la taille et la durée reelles sont connues uniquement
+		// a la fin. Si fournies dans le PATCH, on les applique avant la verification.
+		if req.FileSize > 0 {
+			fileSize = req.FileSize
+			if _, err := h.db.Exec(r.Context(),
+				`UPDATE videos SET file_size = $1 WHERE id = $2`,
+				fileSize, videoID,
+			); err != nil {
+				slog.Error("failed to update file_size", "video_id", videoID, "error", err)
+			}
+		}
+		if req.Duration > 0 {
+			duration = req.Duration
+			if _, err := h.db.Exec(r.Context(),
+				`UPDATE videos SET duration = $1 WHERE id = $2`,
+				duration, videoID,
+			); err != nil {
+				slog.Error("failed to update duration", "video_id", videoID, "error", err)
+			}
 		}
 
 		size, contentType, err := h.storage.HeadObject(r.Context(), fileKey)

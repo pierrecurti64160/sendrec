@@ -9,7 +9,7 @@ import (
 
 const (
 	AccessTokenDuration  = 15 * time.Minute
-	RefreshTokenDuration = 7 * 24 * time.Hour
+	RefreshTokenDuration = 90 * 24 * time.Hour
 )
 
 type Claims struct {

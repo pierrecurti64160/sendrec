@@ -804,7 +804,7 @@ var watchPageTemplate = template.Must(template.New("watch").Funcs(watchFuncs).Pa
         <div class="player-container" id="player-container">
             <video id="player" playsinline webkit-playsinline{{if .TranscriptURL}} crossorigin="anonymous"{{end}}{{if not .DownloadEnabled}} controlsList="nodownload" oncontextmenu="return false;"{{end}}{{if .ThumbnailURL}} poster="{{.ThumbnailURL}}"{{end}}>
                 <source src="{{.VideoURL}}" type="{{.ContentType}}">
-                {{if .TranscriptURL}}<track kind="subtitles" src="{{.TranscriptURL}}" srclang="en" label="Subtitles" default>{{end}}
+                {{if .TranscriptURL}}<track kind="subtitles" src="{{.TranscriptURL}}" srclang="fr" label="Sous-titres">{{end}}
                 Your browser does not support video playback.
             </video>
 ` + playerControlsHTML + `

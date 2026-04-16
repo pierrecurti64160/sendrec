@@ -35,6 +35,10 @@ func isTranscriptionAvailable() bool {
 	if os.Getenv("TRANSCRIPTION_ENABLED") != "true" {
 		return false
 	}
+	// Groq : API distante, pas besoin de CLI locale
+	if isGroqAvailable() {
+		return true
+	}
 	// faster-whisper ou whisper-cli (fallback)
 	if _, err := exec.LookPath("faster-whisper-cli"); err == nil {
 		return true
@@ -222,7 +226,9 @@ func processTranscription(ctx context.Context, db database.DBTX, storage ObjectS
 		return
 	}
 
-	tmpAudio, err := os.CreateTemp("", "sendrec-transcribe-*.wav")
+	// Extract audio en MP3 64 kbps : compact (< 25 MB jusqu'a ~50 min)
+	// + compatible avec Groq API et faster-whisper
+	tmpAudio, err := os.CreateTemp("", "sendrec-transcribe-*.mp3")
 	if err != nil {
 		slog.Error("transcribe: failed to create temp audio file", "error", err)
 		setFailed()
@@ -232,7 +238,7 @@ func processTranscription(ctx context.Context, db database.DBTX, storage ObjectS
 	_ = tmpAudio.Close()
 	defer func() { _ = os.Remove(tmpAudioPath) }()
 
-	if err := extractAudio(tmpVideoPath, tmpAudioPath); err != nil {
+	if err := extractAudioMP3(tmpVideoPath, tmpAudioPath); err != nil {
 		if errors.Is(err, errNoAudio) {
 			slog.Info("transcribe: video has no audio stream", "video_id", videoID)
 			if _, dbErr := db.Exec(ctx,
@@ -263,21 +269,43 @@ func processTranscription(ctx context.Context, db database.DBTX, storage ObjectS
 		_ = os.Remove(tmpOutputPrefix)
 	}()
 
-	if err := runWhisper(tmpAudioPath, tmpOutputPrefix, language); err != nil {
-		slog.Error("transcribe: whisper failed", "video_id", videoID, "error", err)
-		setFailed()
-		return
+	// Transcription : Groq en priorite (15-20x plus rapide), fallback faster-whisper local
+	var segments []TranscriptSegment
+	vttPath := tmpOutputPrefix + ".vtt"
+	usedGroq := false
+
+	if isGroqAvailable() {
+		groqSegs, groqErr := transcribeWithGroq(ctx, tmpAudioPath, language)
+		if groqErr == nil {
+			segments = groqSegs
+			if err := writeVTT(vttPath, segments); err != nil {
+				slog.Error("transcribe: failed to write VTT from groq", "video_id", videoID, "error", err)
+				setFailed()
+				return
+			}
+			usedGroq = true
+			slog.Info("transcribe: groq OK", "video_id", videoID, "segments", len(segments))
+		} else {
+			slog.Warn("transcribe: groq failed, fallback to whisper", "video_id", videoID, "error", groqErr)
+		}
 	}
 
-	segments, err := parseWhisperJSON(tmpOutputPrefix + ".json")
-	if err != nil {
-		slog.Error("transcribe: failed to parse whisper output", "video_id", videoID, "error", err)
-		setFailed()
-		return
+	if !usedGroq {
+		if err := runWhisper(tmpAudioPath, tmpOutputPrefix, language); err != nil {
+			slog.Error("transcribe: whisper failed", "video_id", videoID, "error", err)
+			setFailed()
+			return
+		}
+		whisperSegs, err := parseWhisperJSON(tmpOutputPrefix + ".json")
+		if err != nil {
+			slog.Error("transcribe: failed to parse whisper output", "video_id", videoID, "error", err)
+			setFailed()
+			return
+		}
+		segments = whisperSegs
 	}
 
 	transcriptKey := transcriptFileKey(userID, shareToken)
-	vttPath := tmpOutputPrefix + ".vtt"
 	if err := storage.UploadFile(ctx, transcriptKey, vttPath, "text/vtt"); err != nil {
 		slog.Error("transcribe: failed to upload VTT", "video_id", videoID, "error", err)
 		setFailed()
